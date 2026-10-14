@@ -1,0 +1,1100 @@
+<script>
+/* ==========================================================================
+   Buffer AJU Frames : front-end (vanilla JS)
+   Données : getDashboardData() (un seul JSON), écritures : saveBlockParams / saveGlobalParams / saveMapping
+   ========================================================================== */
+(function () {
+  'use strict';
+
+  var TV = window.APP_MODE === 'tv';
+  var LS_KEY = 'bufferAJU.state.v1';
+  var FILTER_KEYS = ['prog', 'ver', 'cadre', 'avar', 'cote', 'flux', 'st'];
+  var STATUS = {
+    ROUGE: { label: 'ROUGE', icon: '▼', order: 0, title: 'Sous le mini : produire ou appeler en priorité' },
+    DEBORD: { label: 'DÉBORD', icon: '▲', order: 1, title: 'Au-delà de la capacité : excédent en zone de débord' },
+    VERT: { label: 'VERT', icon: '✓', order: 2, title: 'Entre mini et maxi' },
+    PLEIN: { label: 'PLEIN', icon: '■', order: 3, title: 'Maxi atteint : on n\'appelle plus' }
+  };
+  var PROG_ORDER = ['A320', 'A321', 'A330'];
+  var FLUX_ORDER = ['AMBOISE', 'M5', 'T5X→H5', 'V4'];
+  var FLUX_SUB = { 'AMBOISE': 'bâtis via F07', 'M5': 'usinage · séquenceur', 'T5X→H5': 'séquenceur H5', 'V4': '' };
+  var FAM_COLORS = { 'A320-C42': '#84BD00', 'A321-C42': '#005587', 'A320-C36': '#E07AAE', 'A321-C36': '#FE5000', 'A330-C40': '#0085AD', 'A330-C47': '#859199' };
+  var FAM_LIGHT = { 'A320-C42': true, 'A321-C36': true };
+
+  var DEFAULT_STATE = { prog: ['A320', 'A321'], ver: [], cadre: [], avar: [], cote: [], flux: [], st: [], q: '', sort: 'crit', view: 'buffer', year: '', print: 'A4' };
+  var S = clone(DEFAULT_STATE);
+  var DATA = null, HISTO = null, JOURNAL = null;
+  var OPEN = {}, DRAFT = {}, MAP_DRAFT = {};
+  var loading = false, tvTimer = null, tvSlide = 0, chart = null, chartJsLoading = null;
+
+  /* ------------------------------------------------------------------ */
+  /* Utilitaires                                                         */
+  /* ------------------------------------------------------------------ */
+  function $(sel, root) { return (root || document).querySelector(sel); }
+  function $all(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+  function clone(o) { return JSON.parse(JSON.stringify(o)); }
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function n(v) {
+    var x = Math.round((Number(v) || 0) * 10) / 10;
+    return x.toLocaleString('fr-FR');
+  }
+  function pct(v) { return Math.round((v || 0) * 100) + ' %'; }
+  function famKey(b) { return b.prog + '-' + b.cadre; }
+  function blockName(b) { return b.prog + ' ' + b.version + ' ' + b.bloc; }
+  function g(key) { return DATA && DATA.globals ? DATA.globals[key] : null; }
+  function photoHours() { return String(g('heures_photo') || '').split(';').join(' et '); }
+  function normFlux(f) { return String(f || '').toUpperCase().replace(/\s+/g, '').replace('->', '→'); }
+
+  function run(fn) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve, reject) {
+      var r = google.script.run.withSuccessHandler(resolve).withFailureHandler(function (e) {
+        reject(e && e.message ? e : new Error(String(e)));
+      });
+      r[fn].apply(r, args);
+    });
+  }
+
+  var toastTimer = null;
+  function toast(msg, isErr) {
+    var t = $('#toast');
+    t.textContent = msg;
+    t.className = 'toast' + (isErr ? ' err' : '');
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.hidden = true; }, isErr ? 7000 : 3500);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* État : URL (google.script.history) + localStorage                   */
+  /* ------------------------------------------------------------------ */
+  function loadState(cb) {
+    var fromLs = null;
+    try { fromLs = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (e) { fromLs = null; }
+    if (fromLs) Object.keys(DEFAULT_STATE).forEach(function (k) { if (fromLs[k] !== undefined) S[k] = fromLs[k]; });
+    var apply = function (p) {
+      p = p || {};
+      var any = FILTER_KEYS.concat(['q', 'sort', 'view', 'year']).some(function (k) { return p[k] !== undefined; });
+      if (any) {
+        FILTER_KEYS.forEach(function (k) { S[k] = p[k] !== undefined ? String(p[k]).split(',').filter(Boolean) : clone(DEFAULT_STATE[k]); });
+        S.q = p.q || '';
+        if (p.sort) S.sort = p.sort;
+        if (p.view) S.view = p.view;
+        if (p.year) S.year = p.year;
+      }
+      cb();
+    };
+    try { google.script.url.getLocation(function (loc) { apply(loc && loc.parameter); }); } catch (e) { apply({}); }
+  }
+
+  function saveState() {
+    if (TV) return;
+    try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch (e) { /* stockage indisponible */ }
+    var p = {};
+    FILTER_KEYS.forEach(function (k) {
+      if (JSON.stringify(S[k]) !== JSON.stringify(DEFAULT_STATE[k])) p[k] = S[k].join(',');
+    });
+    if (S.q) p.q = S.q;
+    if (S.sort !== 'crit') p.sort = S.sort;
+    if (S.view !== 'buffer') p.view = S.view;
+    if (S.year) p.year = S.year;
+    try { google.script.history.replace(null, p); } catch (e) { /* hors Apps Script */ }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Chargement                                                          */
+  /* ------------------------------------------------------------------ */
+  function load(force) {
+    if (loading) return;
+    loading = true;
+    var btn = $('#btn-refresh');
+    btn.classList.add('loading'); btn.disabled = true;
+    run('getDashboardData', { year: S.year || null, force: !!force }).then(function (d) {
+      DATA = d;
+      if (!S.year) S.year = d.year;
+      loading = false;
+      btn.classList.remove('loading'); btn.disabled = false;
+      renderAll();
+      if (force) toast('Données relues depuis les Google Sheets');
+      loadHistory();
+    }).catch(function (e) {
+      loading = false;
+      btn.classList.remove('loading'); btn.disabled = false;
+      showFatal(e.message);
+    });
+  }
+
+  function loadHistory() {
+    run('getHistoryData', 90).then(function (h) {
+      HISTO = h;
+      if (S.view === 'histo') renderHisto();
+      $all('.spark-slot').forEach(function (el) { el.innerHTML = sparkSvg(el.getAttribute('data-id'), 60, 16); });
+      Object.keys(OPEN).forEach(function (id) { var el = $('#spark-' + cssId(id)); if (el) el.innerHTML = sparkDetail(id); });
+    }).catch(function () { HISTO = { kpi: {}, blocks: {}, error: true }; });
+  }
+
+  function showFatal(msg) {
+    var hint = /setup\(\)/.test(msg) ? 'Un administrateur doit lancer setup() dans l\'éditeur Apps Script (voir README).'
+      : /Pas d'accès/.test(msg) ? 'Vérifiez que le compte qui déploie la web app a accès en lecture au fichier.'
+      : /introuvable/.test(msg) ? 'L\'onglet a peut-être été renommé ou supprimé dans le Google Sheet source.'
+      : 'Réessayez dans un instant. Si le problème persiste, contactez le pilote du buffer.';
+    $('#view-buffer').hidden = false;
+    $('#view-buffer').innerHTML = '<div class="error-box" role="alert"><b>Impossible de charger le buffer</b>' +
+      '<p>' + esc(msg) + '</p><p>' + esc(hint) + '</p><button type="button" class="btn" id="btn-retry">Réessayer</button></div>';
+    $('#btn-retry').onclick = function () { load(true); };
+    $('#kpis').innerHTML = '';
+    $('#stamp').textContent = 'Données indisponibles';
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Filtres et KPI                                                      */
+  /* ------------------------------------------------------------------ */
+  function matches(b, skipKey) {
+    if (skipKey !== 'prog' && S.prog.length && S.prog.indexOf(b.prog) < 0) return false;
+    if (skipKey !== 'ver' && S.ver.length && S.ver.indexOf(b.version) < 0 &&
+      !b.refs.some(function (r) { return r.versionRef && S.ver.indexOf(r.versionRef) >= 0; })) return false;
+    if (skipKey !== 'cadre' && S.cadre.length && S.cadre.indexOf(b.cadre) < 0) return false;
+    if (skipKey !== 'avar' && S.avar.length && S.avar.indexOf(b.avar) < 0) return false;
+    if (skipKey !== 'cote' && S.cote.length && S.cote.indexOf(b.cote) < 0) return false;
+    if (skipKey !== 'flux' && S.flux.length && S.flux.indexOf(b.flux) < 0) return false;
+    if (skipKey !== 'st' && S.st.length && S.st.indexOf(b.status) < 0) return false;
+    if (S.q) {
+      var hay = [b.prog, b.version, b.bloc, b.flux, b.l1Designation].concat(b.refs.map(function (r) { return r.ref + ' ' + r.designation; }))
+        .concat(b.ofs.map(function (o) { return o.of + ' ' + o.serie; })).join(' ').toLowerCase();
+      var terms = S.q.toLowerCase().split(/\s+/).filter(Boolean);
+      if (!terms.every(function (t) { return hay.indexOf(t) >= 0; })) return false;
+    }
+    return true;
+  }
+  function filtered() { return DATA ? DATA.blocks.filter(function (b) { return matches(b); }) : []; }
+
+  function kpisOf(blocks) {
+    var k = { blocks: blocks.length, aju: 0, cap: 0, avenir: 0, rouge: 0, vert: 0, plein: 0, debordBlocks: 0, debord: 0, oldest: null, ageAlert: 0 };
+    blocks.forEach(function (b) {
+      k.aju += b.aju; k.cap += b.cap; k.avenir += b.avenir; k.debord += b.excess;
+      if (b.status === 'ROUGE') k.rouge++; else if (b.status === 'VERT') k.vert++; else if (b.status === 'PLEIN') k.plein++; else k.debordBlocks++;
+      if (b.aju > 0 && (!k.oldest || b.ageMax > k.oldest.age)) k.oldest = { age: b.ageMax, blockId: b.id, label: blockName(b) };
+      if (b.aju > 0 && b.ageMax > g('age_seuil_jours')) k.ageAlert++;
+    });
+    k.fill = k.cap > 0 ? k.aju / k.cap : 0;
+    return k;
+  }
+
+  function debordLevel(count, cap) {
+    var r = cap > 0 ? count / cap * 100 : (count > 0 ? 999 : 0);
+    if (r > 100) return { key: 'sature', label: 'Saturé', r: r };
+    if (r > g('debord_seuil_escalade')) return { key: 'escalade', label: 'Escalade', r: r };
+    if (r > g('debord_seuil_vigilance')) return { key: 'vigilance', label: 'Vigilance', r: r };
+    return { key: 'normal', label: 'Normal', r: r };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Rendu global                                                        */
+  /* ------------------------------------------------------------------ */
+  function renderAll() {
+    if (!DATA) return;
+    renderHeader();
+    renderAlerts();
+    renderKpis();
+    renderFilters();
+    renderTabs();
+    renderView();
+    renderFooter();
+    saveState();
+  }
+
+  function renderView() {
+    ['buffer', 'debord', 'histo', 'params'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+    $('#filters').hidden = S.view === 'params';
+    if (S.view === 'buffer') renderBuffer();
+    else if (S.view === 'debord') renderDebord();
+    else if (S.view === 'histo') renderHisto();
+    else if (S.view === 'params') renderParams();
+    $('#btn-mass').disabled = S.view !== 'buffer' || !filtered().length;
+    $('#btn-mass').textContent = '✎ Modifier la sélection (' + filtered().length + ')';
+  }
+
+  function renderHeader() {
+    var e = DATA.extraction || {};
+    $('#stamp').innerHTML = 'Données SAP du <b>' + esc(e.date || '?') + '</b> à <b>' + esc(e.time || '?') + '</b>' +
+      ' <span class="cache-tag">· calculé le ' + esc(DATA.generatedAt) + (DATA.fromCache ? ' (cache)' : '') + '</span>';
+    $('#print-stamp').textContent = 'Données SAP du ' + (e.date || '?') + ' à ' + (e.time || '?') + ' · imprimé le ' + new Date().toLocaleString('fr-FR');
+    var sel = $('#year');
+    sel.innerHTML = DATA.years.map(function (y) {
+      return '<option value="' + esc(y.key) + '"' + (y.key === DATA.year ? ' selected' : '') + '>' + esc(y.label) + (y.key === g('annee_l1') ? ' (défaut)' : '') + '</option>';
+    }).join('');
+    $('#sort').value = S.sort;
+    $('#print-size').value = S.print || 'A4';
+  }
+
+  function renderAlerts() {
+    var html = '';
+    var um = DATA.unmapped || [];
+    if (um.length) {
+      var pcs = um.reduce(function (a, u) { return a + u.aju + u.avenir; }, 0);
+      html += '<div class="alert alert-unmapped" role="alert"><span>⚠ Réfs non rattachées : ' + um.length + ' réf' + (um.length > 1 ? 's' : '') +
+        ' (' + n(pcs) + ' pièce' + (pcs > 1 ? 's' : '') + ') présentes aux postes BUFFER / AJU mais absentes du mapping : ' +
+        um.map(function (u) { return esc(u.ref); }).join(', ') + '</span>' +
+        (TV ? '' : '<button type="button" class="btn btn-small" data-act="unmapped">Rattacher à un bloc</button>') + '</div>';
+    }
+    var w = DATA.warnings || [];
+    var errs = w.filter(function (x) { return x.level === 'error'; });
+    var other = w.filter(function (x) { return x.level !== 'error'; });
+    errs.forEach(function (x) { html += '<div class="alert alert-error" role="alert">✖ ' + esc(x.msg) + '</div>'; });
+    if (other.length) {
+      var warnN = other.filter(function (x) { return x.level === 'warn'; }).length;
+      html += '<div class="alert ' + (warnN ? 'alert-warn' : 'alert-info') + '"><details><summary>ⓘ ' + other.length + ' message' + (other.length > 1 ? 's' : '') +
+        ' de contrôle des données' + (warnN ? ' dont ' + warnN + ' avertissement' + (warnN > 1 ? 's' : '') : '') + '</summary><ul>' +
+        other.map(function (x) { return '<li>' + esc(x.msg) + '</li>'; }).join('') + '</ul></details></div>';
+    }
+    $('#alerts').innerHTML = html;
+  }
+
+  function byProg(blocks, fn) {
+    var progs = PROG_ORDER.filter(function (p) { return blocks.some(function (b) { return b.prog === p; }); });
+    if (progs.length < 2) return '';
+    return progs.map(function (p) { return p + ' <b>' + fn(kpisOf(blocks.filter(function (b) { return b.prog === p; }))) + '</b>'; }).join(' · ');
+  }
+
+  function renderKpis() {
+    var blocks = filtered();
+    if (TV) blocks = DATA.blocks.filter(function (b) { return tvProgs().indexOf(b.prog) >= 0; });
+    var k = kpisOf(blocks);
+    var cap = g('debord_capacite');
+    var debTotal = DATA.debord.total;
+    var lvl = debordLevel(debTotal, cap);
+    var html = '';
+    html += '<div class="kpi" title="Pièces AJU / Σ capacités des blocs affichés"><span class="kpi-label">Remplissage buffer AJU</span>' +
+      '<span class="kpi-value">' + pct(k.fill) + '</span><div class="minibar"><span style="width:' + Math.min(100, k.fill * 100) + '%"></span></div>' +
+      '<span class="kpi-sub">' + n(k.aju) + ' / ' + n(k.cap) + ' pcs' + (byProg(blocks, function (x) { return pct(x.fill); }) ? '<br>' + byProg(blocks, function (x) { return pct(x.fill); }) : '') + '</span></div>';
+    html += kpiBtn('k-rouge' + (S.st.length === 1 && S.st[0] === 'ROUGE' ? ' active' : ''), 'st:ROUGE', 'Blocs ROUGE ▼', k.rouge,
+      (byProg(blocks, function (x) { return x.rouge; }) || 'sur ' + k.blocks + ' blocs') + (TV ? '' : '<br>Cliquer pour filtrer'));
+    html += kpiBtn('k-plein' + (S.st.length === 1 && S.st[0] === 'PLEIN' ? ' active' : ''), 'st:PLEIN', 'Blocs PLEIN ■', k.plein,
+      (byProg(blocks, function (x) { return x.plein; }) || 'on n\'appelle plus') + (k.debordBlocks ? '<br>+ ' + k.debordBlocks + ' bloc' + (k.debordBlocks > 1 ? 's' : '') + ' en DÉBORD' : ''));
+    html += kpiBtn('k-debord', 'view:debord', 'Débord', n(debTotal) + '<small> / ' + n(cap) + '</small>',
+      '<div class="minibar"><span style="width:' + Math.min(100, lvl.r) + '%;background:var(--' + (lvl.key === 'normal' ? 'green' : lvl.key === 'vigilance' ? 'orange' : 'red') + ')"></span></div>' +
+      '<span class="lvl lvl-' + lvl.key + '">' + lvl.label + '</span> ' + (k.debord !== debTotal ? 'sélection : <b>' + n(k.debord) + '</b>' : '') +
+      (byProg(blocks, function (x) { return n(x.debord); }) ? '<br>' + byProg(blocks, function (x) { return n(x.debord); }) : ''));
+    html += '<div class="kpi k-avenir"><span class="kpi-label">À venir (statut BUFFER)</span><span class="kpi-value">' + n(k.avenir) + '<small> pcs</small></span>' +
+      '<span class="kpi-sub">' + (byProg(blocks, function (x) { return n(x.avenir); }) || 'pièces classées buffer, pas encore en AJU') + '</span></div>';
+    html += kpiBtn('k-age', k.oldest ? 'open:' + k.oldest.blockId : '', 'Pièce la plus ancienne', k.oldest ? n(k.oldest.age) + '<small> j</small>' : '–',
+      k.oldest ? esc(k.oldest.label) + (k.ageAlert ? '<br><b>' + k.ageAlert + '</b> bloc' + (k.ageAlert > 1 ? 's' : '') + ' &gt; ' + g('age_seuil_jours') + ' j' : '') : 'aucune pièce en AJU');
+    var um = DATA.unmapped || [];
+    if (um.length) {
+      var pcs = um.reduce(function (a, u) { return a + u.aju + u.avenir; }, 0);
+      html += kpiBtn('k-unmapped', 'unmapped', 'Réfs non rattachées ⚠', um.length, n(pcs) + ' pièce' + (pcs > 1 ? 's' : '') + ' non comptées dans les blocs');
+    }
+    $('#kpis').innerHTML = html;
+  }
+  function kpiBtn(cls, act, label, value, sub) {
+    var tag = act && !TV ? 'button type="button" data-act="' + esc(act) + '"' : 'div';
+    return '<' + tag + ' class="kpi ' + cls + '"><span class="kpi-label">' + label + '</span><span class="kpi-value">' + value +
+      '</span><span class="kpi-sub">' + sub + '</span></' + (tag === 'div' ? 'div' : 'button') + '>';
+  }
+
+  function uniq(arr) { return arr.filter(function (v, i) { return v && arr.indexOf(v) === i; }); }
+
+  function renderFilters() {
+    if (TV) return;
+    var all = DATA.blocks;
+    var vers = uniq(all.map(function (b) { return b.version; }).concat([].concat.apply([], all.map(function (b) { return b.refs.map(function (r) { return r.versionRef; }); }))));
+    var groups = [
+      { key: 'prog', label: 'Programme', opts: uniq(PROG_ORDER.concat(all.map(function (b) { return b.prog; }))) },
+      { key: 'ver', label: 'Version', opts: vers },
+      { key: 'cadre', label: 'Cadre', opts: uniq(all.map(function (b) { return b.cadre; })).sort() },
+      { key: 'avar', label: 'AV / AR', opts: ['AV', 'AR'] },
+      { key: 'cote', label: 'Côté', opts: ['D', 'G'] },
+      { key: 'flux', label: 'Flux', opts: uniq(all.map(function (b) { return b.flux; })).sort(function (a, b) { return fluxRank(a) - fluxRank(b); }) },
+      { key: 'st', label: 'Statut', opts: ['ROUGE', 'VERT', 'PLEIN', 'DEBORD'] }
+    ];
+    var html = groups.map(function (gr) {
+      return '<div class="fgroup" role="group" aria-label="' + gr.label + '"><span class="fgroup-label">' + gr.label + '</span>' +
+        gr.opts.map(function (o) {
+          var on = S[gr.key].indexOf(o) >= 0;
+          var cnt = DATA.blocks.filter(function (b) {
+            return matches(b, gr.key) && (gr.key === 'ver' ? (b.version === o || b.refs.some(function (r) { return r.versionRef === o; })) : blockVal(b, gr.key) === o);
+          }).length;
+          var lab = gr.key === 'st' ? STATUS[o].icon + ' ' + STATUS[o].label : (gr.key === 'cote' ? (o === 'D' ? 'Droit' : 'Gauche') : o);
+          return '<button type="button" class="chip' + (gr.key === 'st' ? ' st-' + o : '') + '" aria-pressed="' + on + '" data-f="' + gr.key + '" data-v="' + esc(o) + '">' +
+            esc(lab) + '<span class="n">' + cnt + '</span></button>';
+        }).join('') + '</div>';
+    }).join('');
+    html += '<div class="search"><input type="search" id="q" placeholder="Rechercher une réf, une désignation, un OF…" value="' + esc(S.q) + '" aria-label="Recherche libre">' +
+      '<button type="button" class="linkish" data-act="reset-filters">Réinitialiser</button></div>';
+    $('#filters').innerHTML = html;
+  }
+  function blockVal(b, key) { return { prog: b.prog, cadre: b.cadre, avar: b.avar, cote: b.cote, flux: b.flux, st: b.status }[key]; }
+  function fluxRank(f) { var i = FLUX_ORDER.indexOf(normFlux(f)); return i < 0 ? 99 : i; }
+
+  function renderTabs() {
+    $all('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
+  }
+
+  function renderFooter() {
+    var parts = [];
+    if (DATA.user) parts.push('Connecté : ' + esc(DATA.user));
+    if (!TV && DATA.paramsUrl) parts.push('<a href="' + esc(DATA.paramsUrl) + '" target="_blank" rel="noopener">Classeur Paramètres</a>');
+    parts.push(DATA.stats.piecesRows + ' lignes ZZ84 aux postes BUFFER / AJU');
+    $('#foot-left').innerHTML = parts.join(' · ');
+    var f = [];
+    FILTER_KEYS.forEach(function (k) { if (S[k].length) f.push(k + ' = ' + S[k].join('/')); });
+    if (S.q) f.push('recherche « ' + S.q + ' »');
+    $('#print-filters').textContent = f.length ? 'Filtres : ' + f.join(' · ') : 'Tous les blocs';
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Vue Buffer                                                          */
+  /* ------------------------------------------------------------------ */
+  function sortBlocks(list) {
+    var cmp;
+    if (S.sort === 'bloc') {
+      cmp = function (a, b) {
+        return a.cadre.localeCompare(b.cadre) || (a.avar === b.avar ? 0 : a.avar === 'AV' ? -1 : 1) ||
+          a.version.localeCompare(b.version) || (a.cote === b.cote ? 0 : a.cote === 'D' ? -1 : 1);
+      };
+    } else if (S.sort === 'fill-asc' || S.sort === 'fill-desc') {
+      var sgn = S.sort === 'fill-asc' ? 1 : -1;
+      cmp = function (a, b) { return sgn * (a.fill - b.fill) || a.order - b.order; };
+    } else {
+      cmp = function (a, b) {
+        var d = STATUS[a.status].order - STATUS[b.status].order;
+        if (d) return d;
+        if (a.status === 'ROUGE') return (a.mini ? a.aju / a.mini : 1) - (b.mini ? b.aju / b.mini : 1) || a.order - b.order;
+        if (a.status === 'DEBORD') return b.excess - a.excess || a.order - b.order;
+        return a.fill - b.fill || a.order - b.order;
+      };
+    }
+    return list.slice().sort(cmp);
+  }
+
+  function renderBuffer(progOverride) {
+    var root = $('#view-buffer');
+    var list = filtered();
+    if (progOverride) list = DATA.blocks.filter(function (b) { return progOverride.indexOf(b.prog) >= 0 && matches(b, 'prog'); });
+    if (!list.length) {
+      root.innerHTML = '<div class="empty"><b>Aucun bloc ne correspond aux filtres</b>Modifiez la sélection ou ' +
+        '<button type="button" class="linkish" data-act="reset-filters">réinitialisez les filtres</button>.' +
+        (S.prog.indexOf('A330') < 0 && !TV ? '<br>Les blocs A330 sont masqués par défaut : activez la puce « A330 ».' : '') + '</div>';
+      return;
+    }
+    var html = '';
+    PROG_ORDER.concat(uniq(list.map(function (b) { return b.prog; })).filter(function (p) { return PROG_ORDER.indexOf(p) < 0; })).forEach(function (p) {
+      var pl = list.filter(function (b) { return b.prog === p; });
+      if (!pl.length) return;
+      var k = kpisOf(pl);
+      html += '<div class="band"><span>' + esc(p) + '</span><span class="band-sub">' + pl.length + ' blocs · AJU ' + n(k.aju) + ' / ' + n(k.cap) +
+        ' pcs (' + pct(k.fill) + ') · ' + k.rouge + ' rouge' + (k.rouge > 1 ? 's' : '') + ' · débord +' + n(k.debord) + ' · à venir ' + n(k.avenir) + '</span></div>';
+      html += '<div class="col-heads" aria-hidden="true"><span>À venir</span><span>Bloc</span><span>Niveau AJU · une case = une pièce</span><span>Débord</span><span>Âge max</span></div>';
+      var fluxes = uniq(pl.map(function (b) { return b.flux; })).sort(function (a, b) { return fluxRank(a) - fluxRank(b); });
+      fluxes.forEach(function (f) {
+        var fl = sortBlocks(pl.filter(function (b) { return b.flux === f; }));
+        html += '<div class="flux-head">' + esc(f) + ' <span>' + esc(FLUX_SUB[normFlux(f)] || '') + '</span></div>';
+        fl.forEach(function (b) { html += rowHtml(b); });
+      });
+    });
+    root.innerHTML = html;
+  }
+
+  function cssId(id) { return String(id).replace(/[^A-Za-z0-9_-]/g, '_'); }
+
+  function rowHtml(b) {
+    var st = STATUS[b.status];
+    var open = !!OPEN[b.id] && !TV;
+    var ageAlert = b.aju > 0 && b.ageMax > g('age_seuil_jours');
+    var aValider = b.refs.some(function (r) { return r.aValider; });
+    var empl = function (pcs) { return n(pcs / b.ppe) + ' empl.'; };
+    var tip = blockName(b) + ' · ' + st.label + '\nAJU ' + n(b.aju) + ' pcs (' + empl(b.aju) + ') · à venir ' + n(b.avenir) + ' · projection ' + n(b.projection) +
+      '\nMini ' + b.mini + ' · Maxi ' + b.maxi + ' · Capacité ' + b.cap + ' pcs (' + empl(b.cap) + ', ' + b.ppe + ' pc/empl.)';
+    var h = '<div class="row st-' + b.status + '" id="row-' + cssId(b.id) + '" data-id="' + esc(b.id) + '" role="button" tabindex="0" aria-expanded="' + open + '" aria-controls="det-' + cssId(b.id) + '" title="' + esc(tip) + '">';
+    h += '<span class="fam fam-' + famKey(b) + '" aria-hidden="true"></span>';
+    h += '<div class="c-av"><span class="avenir' + (b.avenir ? '' : ' zero') + '" aria-label="' + n(b.avenir) + ' pièces à venir"><b>' + n(b.avenir) + '</b><small>à venir</small></span></div>';
+    h += '<div class="c-name"><div class="bname">' + esc(b.bloc) + '</div><div class="meta"><span class="ver">' + esc(b.version) + '</span>' +
+      '<span class="flux-chip">' + esc(b.flux) + '</span><span class="st-pill ' + b.status + '" title="' + esc(st.title) + '">' + st.icon + ' ' + st.label + '</span>' +
+      (aValider ? '<span class="warn-pill" title="Rattachement de réf à valider">à valider</span>' : '') +
+      (b.l1Missing ? '<span class="warn-pill" title="Réf L1 absente de l\'onglet L1">L1 ?</span>' : '') +
+      '<span class="spark-inline spark-slot no-tv" data-id="' + esc(b.id) + '">' + (HISTO ? sparkSvg(b.id, 60, 16) : '') + '</span></div></div>';
+    h += '<div class="c-gauge">' + gaugeHtml(b) + '</div>';
+    h += '<div class="c-deb">' + (b.excess > 0 ? '<span class="deb" aria-label="' + b.excess + ' pièces en débord"><b>+' + n(b.excess) + '</b><small>débord</small></span>' : '<span class="deb-none" aria-label="pas de débord">–</span>') +
+      (b.projExcess > b.excess ? '<span class="deb-proj">prévu +' + n(b.projExcess) + '</span>' : '') + '</div>';
+    h += '<div class="c-age">' + (b.aju > 0 ? (ageAlert ? '<span class="age-badge" title="Pièce au poste depuis plus de ' + g('age_seuil_jours') + ' j">⏱ ' + n(b.ageMax) + ' j</span>' : n(b.ageMax) + ' j') + '<small>âge max</small>' : '<span class="deb-none">–</span>') + '</div>';
+    h += '<span class="chev no-tv" aria-hidden="true">▶</span></div>';
+    if (open) h += detailHtml(b);
+    return h;
+  }
+
+  function gaugeHtml(b) {
+    var cap = b.cap;
+    var label = 'AJU ' + n(b.aju) + ' sur capacité ' + cap + ', mini ' + b.mini + ', maxi ' + b.maxi + ', à venir ' + n(b.avenir);
+    if (cap <= 0) {
+      return '<div class="gauge-zero" role="img" aria-label="' + esc(label) + '">Capacité 0' + (b.aju ? ' : tout part au débord' : '') + '</div>' + legendHtml(b);
+    }
+    var cells = '';
+    var aju = Math.min(Math.round(b.aju), cap), proj = Math.min(Math.round(b.projection), cap);
+    for (var i = 0; i < cap; i++) cells += '<span class="cell' + (i < aju ? ' on' : (i < proj ? ' proj' : '')) + '"></span>';
+    var marks = '';
+    if (b.mini > 0) marks += '<span class="mark mini" style="left:calc(' + (b.mini / cap * 100) + '% - ' + (b.mini / cap * 3) + 'px)"><span>min ' + b.mini + '</span></span>';
+    if (b.maxi > 0) marks += '<span class="mark maxi' + (b.maxi >= cap ? ' at-end' : '') + '" style="left:calc(' + (b.maxi / cap * 100) + '% - ' + (b.maxi / cap * 3) + 'px)"><span>max ' + b.maxi + '</span></span>';
+    return '<div class="gauge" style="--cap:' + cap + '" role="img" aria-label="' + esc(label) + '">' + cells + marks + '</div>' + legendHtml(b);
+  }
+
+  function legendHtml(b) {
+    var parts = ['<span><b>' + n(b.aju) + '</b> / ' + b.cap + ' pcs</span>'];
+    if (b.ppe > 1) parts.push('<span>' + n(b.aju / b.ppe) + ' / ' + n(b.cap / b.ppe) + ' empl.</span>');
+    if (b.avenir > 0) {
+      var ps = STATUS[b.projStatus];
+      parts.push('<span class="proj-hint">→ ' + n(b.projection) + ' avec l\'à venir' + (b.projStatus !== b.status ? ' : ' + ps.icon + ' ' + ps.label : '') + '</span>');
+    }
+    return '<div class="gauge-legend">' + parts.join('') + '</div>';
+  }
+
+  function detailHtml(b) {
+    var h = '<div class="detail" id="det-' + cssId(b.id) + '">';
+    h += '<div><h3>Détail par réf</h3><div class="scroll" style="max-height:none"><table class="tbl"><thead><tr><th>Réf</th><th>Type</th><th>Désignation</th><th class="num">AJU</th><th class="num">À venir</th></tr></thead><tbody>' +
+      b.refs.map(function (r) {
+        return '<tr><td class="mono">' + esc(r.ref) + '</td><td><span class="type-tag ' + esc(r.type) + '">' + esc(r.type) + '</span>' +
+          (r.versionRef ? ' <span class="type-tag">' + esc(r.versionRef) + '</span>' : '') +
+          (r.aValider ? ' <span class="warn-pill" title="' + esc(r.comment || 'Rattachement à valider') + '">à valider</span>' : '') + '</td>' +
+          '<td>' + esc(r.designation || '–') + '</td><td class="num">' + n(r.aju) + '</td><td class="num">' + n(r.avenir) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      '<div class="spark-box"><h3>Évolution AJU (photos)</h3><div id="spark-' + cssId(b.id) + '">' + sparkDetail(b.id) + '</div></div></div>';
+    h += '<div><h3>Ordres de fabrication (' + b.ofs.length + ')</h3>' + (b.ofs.length ? '<div class="scroll"><table class="tbl"><thead><tr><th>N° OF</th><th>Réf</th><th class="num">Qté</th><th class="num">Âge</th><th>Opér.</th><th>N° série</th><th>Statut</th></tr></thead><tbody>' +
+      b.ofs.map(function (o) {
+        var old = o.statut === 'AJU' && o.age > g('age_seuil_jours');
+        return '<tr><td class="mono">' + esc(o.of) + '</td><td class="mono">' + esc(o.ref) + '</td><td class="num">' + n(o.qte) + '</td>' +
+          '<td class="num">' + (old ? '<span class="age-badge">' + n(o.age) + ' j</span>' : n(o.age) + ' j') + '</td><td>' + esc(o.oper) + '</td><td>' + esc(o.serie) + '</td>' +
+          '<td>' + (o.statut === 'AJU' ? '<span class="tag-aju">AJU</span>' : '<span class="tag-avenir">À venir</span>') + ' <small>' + esc(o.poste) + '</small></td></tr>';
+      }).join('') + '</tbody></table></div>' : '<p class="deb-none">Aucun OF aux postes BUFFER / AJU.</p>') + '</div>';
+    if (!TV) h += settingsHtml(b);
+    return h + '</div>';
+  }
+
+  /* --- Réglages d'un bloc (stepper + validation) --- */
+  function draftOf(b) {
+    if (!DRAFT[b.id]) DRAFT[b.id] = { cap: b.cap, maxi: b.maxi, mini: b.mini, unit: b.overrides.unit ? b.unit : '', touched: {} };
+    return DRAFT[b.id];
+  }
+  function defaultsFor(b, d) {
+    var unit = d.unit || g('unite');
+    var capDef = Math.round((b.l1Value || 0) * (unit === 'emplacements' ? b.ppe : 1));
+    var cap = d.touched.cap || b.overrides.cap ? d.cap : capDef;
+    var maxiDef = cap;
+    var maxi = d.touched.maxi || b.overrides.maxi ? d.maxi : maxiDef;
+    var miniDef = cap > 0 ? Math.min(Math.max(1, Math.ceil(g('mini_pct') / 100 * cap)), maxi) : 0;
+    return { capDef: capDef, maxiDef: maxiDef, miniDef: miniDef, cap: cap, maxi: maxi, mini: d.touched.mini || b.overrides.mini ? d.mini : miniDef };
+  }
+  function settingsHtml(b) {
+    var d = draftOf(b), v = defaultsFor(b, d);
+    d.cap = v.cap; d.maxi = v.maxi; d.mini = v.mini;
+    var err = !(v.mini >= 0 && v.mini <= v.maxi && v.maxi <= v.cap) ? 'Contrôle : 0 ≤ mini ≤ maxi ≤ capacité' : '';
+    var f = function (key, label, val, def, over) {
+      return '<div class="field"><label for="ed-' + cssId(b.id) + '-' + key + '">' + label + '</label><div class="stepper">' +
+        '<button type="button" data-step="-1" data-k="' + key + '" aria-label="' + label + ' moins un">−</button>' +
+        '<input type="number" min="0" step="1" inputmode="numeric" id="ed-' + cssId(b.id) + '-' + key + '" data-k="' + key + '" value="' + val + '">' +
+        '<button type="button" data-step="1" data-k="' + key + '" aria-label="' + label + ' plus un">+</button></div>' +
+        '<span class="hint' + (val !== def ? ' over' : '') + '">' + (val !== def ? 'surchargé · défaut ' + def : 'valeur par défaut') + '</span></div>';
+    };
+    var unitSel = '<div class="field"><label for="ed-' + cssId(b.id) + '-unit">Unité L1</label><select id="ed-' + cssId(b.id) + '-unit" data-k="unit">' +
+      '<option value=""' + (!d.unit ? ' selected' : '') + '>Globale (' + (g('unite') === 'emplacements' ? 'emplacements' : 'pièces') + ')</option>' +
+      '<option value="pieces"' + (d.unit === 'pieces' ? ' selected' : '') + '>Pièces</option>' +
+      '<option value="emplacements"' + (d.unit === 'emplacements' ? ' selected' : '') + '>Emplacements</option></select>' +
+      '<span class="hint">L1 ' + esc(DATA.year) + ' : ' + (b.l1Value === null ? 'réf absente' : n(b.l1Value)) + ' · ' + b.ppe + ' pc/empl. (' + (b.avar || 'AV') + ')</span></div>';
+    return '<div class="settings" data-id="' + esc(b.id) + '"><h3>Réglages du bloc (partagés)</h3>' +
+      f('cap', 'Capacité', v.cap, v.capDef) + f('maxi', 'Maxi', v.maxi, v.maxiDef) + f('mini', 'Mini', v.mini, v.miniDef) + unitSel +
+      '<div class="form-err" role="alert">' + err + '</div>' +
+      '<div class="actions"><button type="button" class="btn" data-act="save-block"' + (err ? ' disabled' : '') + '>Enregistrer</button>' +
+      '<button type="button" class="btn btn-ghost" data-act="reset-block">Réinitialiser aux valeurs L1</button></div>' +
+      '<p class="hint" style="font-size:.7rem;color:var(--muted);margin:.4rem 0 0">Valeurs en pièces. Équivalent : ' + n(v.cap / b.ppe) + ' emplacements.</p></div>';
+  }
+
+  function refreshSettings(id) {
+    var b = blockById(id);
+    var box = $('.settings[data-id="' + id + '"]');
+    if (!b || !box) return;
+    var tmp = document.createElement('div');
+    tmp.innerHTML = settingsHtml(b);
+    var focusK = document.activeElement && document.activeElement.getAttribute('data-k');
+    box.parentNode.replaceChild(tmp.firstChild, box);
+    if (focusK) { var el = $('#ed-' + cssId(id) + '-' + focusK); if (el) { el.focus(); if (el.select) try { el.select(); } catch (e) { /* */ } } }
+  }
+
+  function blockById(id) { return DATA.blocks.filter(function (b) { return b.id === id; })[0]; }
+
+  function saveBlock(id) {
+    var b = blockById(id), d = draftOf(b), v = defaultsFor(b, d);
+    var change = { blockId: id };
+    if (d.touched.cap || b.overrides.cap) change.cap = v.cap === v.capDef ? null : v.cap;
+    if (d.touched.maxi || b.overrides.maxi) change.maxi = v.maxi === v.maxiDef ? null : v.maxi;
+    if (d.touched.mini || b.overrides.mini) change.mini = v.mini === v.miniDef ? null : v.mini;
+    change.unit = d.unit || null;
+    submitBlocks([change]);
+  }
+
+  function submitBlocks(changes, after) {
+    toast('Enregistrement…');
+    return run('saveBlockParams', changes).then(function (res) {
+      changes.forEach(function (c) { if (res.saved.indexOf(c.blockId) >= 0) delete DRAFT[c.blockId]; });
+      if (res.errors.length) toast(res.errors.length + ' bloc(s) refusé(s) : ' + res.errors.map(function (e) { return e.message; }).join(' ; '), true);
+      else toast(res.saved.length + ' bloc' + (res.saved.length > 1 ? 's' : '') + ' enregistré' + (res.saved.length > 1 ? 's' : '') + ' (partagé avec tous les utilisateurs)');
+      if (after) after(res);
+      load();
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Sparklines (SVG)                                                    */
+  /* ------------------------------------------------------------------ */
+  function sparkSvg(id, w, h, withLimits) {
+    var pts = HISTO && HISTO.blocks && HISTO.blocks[id];
+    if (!pts || pts.length < 2) return '';
+    var b = blockById(id) || { mini: 0, maxi: 0, cap: 0 };
+    var vals = pts.map(function (p) { return p.aju; });
+    var max = Math.max.apply(null, vals.concat([b.cap, 1]));
+    var x = function (i) { return (i / (pts.length - 1)) * (w - 2) + 1; };
+    var y = function (v) { return h - 1 - (v / max) * (h - 2); };
+    var line = vals.map(function (v, i) { return x(i).toFixed(1) + ',' + y(v).toFixed(1); }).join(' ');
+    var lim = withLimits ? '<line x1="0" x2="' + w + '" y1="' + y(b.mini) + '" y2="' + y(b.mini) + '" stroke="#E4002B" stroke-dasharray="3 2" stroke-width="1"/>' +
+      '<line x1="0" x2="' + w + '" y1="' + y(b.maxi) + '" y2="' + y(b.maxi) + '" stroke="#4E7A00" stroke-dasharray="3 2" stroke-width="1"/>' : '';
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" role="img" aria-label="Évolution AJU sur ' + pts.length + ' photos">' + lim +
+      '<polyline points="' + line + '" fill="none" stroke="#0085AD" stroke-width="1.6"/>' +
+      '<circle cx="' + x(vals.length - 1) + '" cy="' + y(vals[vals.length - 1]) + '" r="2" fill="#00205B"/></svg>';
+  }
+  function sparkDetail(id) {
+    if (!HISTO) return '<span class="spark-empty">Chargement de l\'historique…</span>';
+    var s = sparkSvg(id, 240, 48, true);
+    return s || '<span class="spark-empty">Pas encore assez de photos (déclencheur à ' + esc(photoHours()) + ').</span>';
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Vue Débord                                                          */
+  /* ------------------------------------------------------------------ */
+  function renderDebord() {
+    var root = $('#view-debord');
+    var cap = g('debord_capacite');
+    var pieces = DATA.debord.pieces;
+    var vis = {};
+    filtered().forEach(function (b) { vis[b.id] = true; });
+    var selCount = pieces.filter(function (p) { return vis[p.blockId]; }).length;
+    var lvl = debordLevel(pieces.length, cap);
+    var meta = (DATA.globalsMeta || {}).debord_capacite || {};
+    var html = '<div class="band"><span>ZONE DE DÉBORD</span><span class="band-sub">' + n(cap) + ' places · une pastille = une pièce, couleur de la famille · premier arrivé, premier repris</span></div>';
+    html += '<div class="deb-head"><div><div class="deb-big">' + n(pieces.length) + '<small> / ' + n(cap) + '</small></div>' +
+      '<span class="lvl lvl-' + lvl.key + '">' + lvl.label + ' · ' + Math.round(lvl.r) + ' %</span></div>' +
+      '<div class="deb-legend">Seuils : ≤ ' + g('debord_seuil_vigilance') + ' % normal · ' + g('debord_seuil_vigilance') + '–' + g('debord_seuil_escalade') + ' % vigilance · &gt; ' +
+      g('debord_seuil_escalade') + ' % escalade · &gt; 100 % saturé (pièces hors zone en rouge)<br>Sélection filtrée : <b>' + n(selCount) + '</b> pièce' + (selCount > 1 ? 's' : '') + ' (les autres sont estompées)</div>';
+    if (!TV) {
+      html += '<div class="deb-cap"><label for="deb-cap"><b>Capacité du débord</b></label><div class="stepper"><button type="button" data-debstep="-1" aria-label="moins un">−</button>' +
+        '<input type="number" id="deb-cap" min="1" step="1" value="' + cap + '"><button type="button" data-debstep="1" aria-label="plus un">+</button></div>' +
+        '<button type="button" class="btn btn-small" data-act="save-debcap">Enregistrer</button>' +
+        '<span class="who">' + (meta.by ? 'modifiée par ' + esc(meta.by) + ' le ' + esc(meta.at) : '') + '</span></div>';
+    }
+    html += '</div>';
+    if (!pieces.length) {
+      html += '<div class="empty"><b>Zone de débord vide</b>Aucun bloc ne dépasse sa capacité.</div>';
+    }
+    var nCells = Math.max(cap, pieces.length);
+    var cells = '';
+    for (var i = 0; i < nCells; i++) {
+      var p = pieces[i];
+      var out = i >= cap;
+      if (!p) { cells += '<div class="slot"><span class="sid">D' + (i + 1) + '</span></div>'; continue; }
+      var fk = p.prog + '-' + p.cadre;
+      var b = blockById(p.blockId) || {};
+      cells += '<div class="slot filled' + (out ? ' out' : '') + (i === 0 ? ' oldest' : '') + (vis[p.blockId] ? '' : ' dim') + '" title="' + esc(p.label + ' · OF ' + p.of + ' · ' + p.ref + ' · ' + n(p.age) + ' j') + '">' +
+        '<span class="sid">' + (out ? 'HORS ZONE' : 'D' + (i + 1)) + '</span>' + (i === 0 ? '<span class="first">1er à reprendre</span>' : '') +
+        '<span class="puck' + (FAM_LIGHT[fk] ? ' light' : '') + '" style="background:' + (FAM_COLORS[fk] || '#859199') + '">' + esc(p.cadre) + '</span>' +
+        '<span class="plabel">' + esc((b.bloc || '').replace(p.cadre + ' ', '')) + '<br>' + esc(p.prog + ' ' + (b.version || '')) + '</span>' +
+        '<span class="page">' + (out ? 'hors zone · ' : '') + n(p.age) + ' j</span></div>';
+    }
+    html += '<div class="deb-grid">' + cells + '</div>';
+    html += '<div class="fam-legend">' + Object.keys(FAM_COLORS).map(function (k) { return '<span><i style="background:' + FAM_COLORS[k] + '"></i>' + k.replace('-', ' ') + '</span>'; }).join('') + '</div>';
+    var over = DATA.blocks.filter(function (b) { return b.excess > 0; }).sort(function (a, b) { return b.excess - a.excess; });
+    if (over.length) {
+      html += '<h3 class="flux-head">Blocs en débord</h3><table class="tbl"><thead><tr><th>Bloc</th><th class="num">AJU</th><th class="num">Capacité</th><th class="num">Excédent</th><th class="num">Âge max</th><th>Lecture</th></tr></thead><tbody>' +
+        over.map(function (b) {
+          return '<tr' + (vis[b.id] ? '' : ' style="opacity:.5"') + '><td><b>' + esc(blockName(b)) + '</b></td><td class="num">' + n(b.aju) + '</td><td class="num">' + b.cap + '</td><td class="num"><b>+' + n(b.excess) + '</b></td><td class="num">' + n(b.ageMax) + ' j</td>' +
+            '<td>' + (b.cap <= 2 ? 'Capacité L1 faible (' + b.cap + ') : vérifier le dimensionnement ou l\'unité' : 'Ne plus appeler ce bloc') + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+    root.innerHTML = html;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Vue Historique                                                      */
+  /* ------------------------------------------------------------------ */
+  var histoScope = 'ALL', histoDays = 30;
+  function renderHisto() {
+    var root = $('#view-histo');
+    if (!HISTO) { root.innerHTML = '<div class="sk sk-band"></div><div class="sk" style="height:18rem"></div>'; return; }
+    if (HISTO.error) { root.innerHTML = '<div class="error-box"><b>Historique indisponible</b><p>Impossible de lire l\'onglet Historique du classeur Paramètres.</p></div>'; return; }
+    var since = Date.now() - histoDays * 86400000;
+    var pts = (HISTO.kpi[histoScope] || []).filter(function (p) { return new Date(p.t).getTime() >= since; });
+    var html = '<div class="band"><span>HISTORIQUE</span><span class="band-sub">photos quotidiennes à ' + esc(photoHours()) + ' (prises de poste)</span></div>';
+    html += '<div class="histo-tools no-tv"><label>Périmètre <select id="h-scope">' + ['ALL', 'A320', 'A321', 'A330'].map(function (s) {
+      return '<option value="' + s + '"' + (s === histoScope ? ' selected' : '') + '>' + (s === 'ALL' ? 'Tous programmes' : s) + '</option>';
+    }).join('') + '</select></label><label>Période <select id="h-days">' + [7, 30, 90].map(function (d) {
+      return '<option value="' + d + '"' + (d === histoDays ? ' selected' : '') + '>' + d + ' jours</option>';
+    }).join('') + '</select></label><button type="button" class="btn btn-ghost btn-small" data-act="snapshot">📷 Prendre une photo maintenant</button></div>';
+    if (pts.length < 1) {
+      html += '<div class="empty"><b>Aucune photo sur la période</b>Les photos sont prises automatiquement à ' + esc(photoHours()) +
+        ' une fois les déclencheurs installés (voir README, installTriggers()).</div>';
+      root.innerHTML = html;
+      return;
+    }
+    html += '<div class="chart-box"><canvas id="h-chart" aria-label="Évolution du remplissage, du débord et du nombre de blocs rouges" role="img"></canvas></div>';
+    html += '<h3 class="flux-head">Par bloc (AJU, pointillés : mini rouge / maxi vert)</h3><div class="spark-grid">' +
+      DATA.blocks.filter(function (b) { return matches(b); }).map(function (b) {
+        var bp = (HISTO.blocks[b.id] || []).filter(function (p) { return new Date(p.t).getTime() >= since; });
+        var nRouge = bp.filter(function (p) { return p.status === 'ROUGE'; }).length;
+        return '<div class="spark-card" style="border-left-color:' + (FAM_COLORS[famKey(b)] || '#859199') + '"><b>' + esc(blockName(b)) + '</b><div>' + (sparkSvg(b.id, 200, 40, true) || '<span class="sv">pas assez de photos</span>') + '</div>' +
+          '<span class="sv">' + bp.length + ' photos · ' + nRouge + ' en rouge · actuel ' + n(b.aju) + ' / ' + b.cap + '</span></div>';
+      }).join('') + '</div>';
+    root.innerHTML = html;
+    drawChart(pts);
+  }
+
+  function loadChartJs() {
+    if (window.Chart) return Promise.resolve();
+    if (chartJsLoading) return chartJsLoading;
+    chartJsLoading = new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js';
+      s.onload = resolve;
+      s.onerror = function () { chartJsLoading = null; reject(new Error('Chart.js indisponible')); };
+      document.head.appendChild(s);
+    });
+    return chartJsLoading;
+  }
+
+  function drawChart(pts) {
+    loadChartJs().then(function () {
+      var cv = $('#h-chart');
+      if (!cv) return;
+      if (chart) { chart.destroy(); chart = null; }
+      var dark = TV;
+      var grid = dark ? '#24406B' : '#D3DAE0', txt = dark ? '#F2F4F5' : '#1A1A1A';
+      chart = new window.Chart(cv, {
+        type: 'line',
+        data: {
+          labels: pts.map(function (p) { var d = new Date(p.t); return d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }) + ' ' + d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }); }),
+          datasets: [
+            { label: 'Remplissage (%)', data: pts.map(function (p) { return p.fill; }), borderColor: '#005587', backgroundColor: 'rgba(0,85,135,.12)', fill: true, yAxisID: 'y', tension: 0.25, pointRadius: 2 },
+            { label: 'Débord (pièces)', data: pts.map(function (p) { return p.debord; }), borderColor: '#FE5000', backgroundColor: '#FE5000', yAxisID: 'y1', tension: 0.25, pointRadius: 2 },
+            { label: 'Blocs rouges', data: pts.map(function (p) { return p.rouges; }), borderColor: '#E4002B', backgroundColor: '#E4002B', borderDash: [5, 3], yAxisID: 'y1', stepped: true, pointRadius: 2 }
+          ]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: { legend: { labels: { color: txt, font: { family: 'Arial' } } } },
+          scales: {
+            x: { ticks: { color: txt, maxRotation: 0, autoSkip: true }, grid: { color: grid } },
+            y: { position: 'left', min: 0, suggestedMax: 100, title: { display: true, text: '%', color: txt }, ticks: { color: txt }, grid: { color: grid } },
+            y1: { position: 'right', min: 0, ticks: { color: txt, precision: 0 }, grid: { drawOnChartArea: false }, title: { display: true, text: 'pièces / blocs', color: txt } }
+          }
+        }
+      });
+    }).catch(function (e) {
+      var cv = $('#h-chart');
+      if (cv) cv.parentNode.innerHTML = '<div class="empty"><b>Graphique indisponible</b>' + esc(e.message) + ' (accès à cdnjs.cloudflare.com bloqué ?)</div>';
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Vue Réglages (paramètres globaux, mapping, journal)                 */
+  /* ------------------------------------------------------------------ */
+  var GLOBAL_FIELDS = [
+    { k: 'debord_capacite', label: 'Capacité du débord (places)', type: 'number' },
+    { k: 'annee_l1', label: 'Année L1 par défaut', type: 'year' },
+    { k: 'unite', label: 'Unité des valeurs L1', type: 'unit' },
+    { k: 'mini_pct', label: 'Mini par défaut (% de la capacité)', type: 'number' },
+    { k: 'debord_seuil_vigilance', label: 'Débord : seuil vigilance (%)', type: 'number' },
+    { k: 'debord_seuil_escalade', label: 'Débord : seuil escalade (%)', type: 'number' },
+    { k: 'age_seuil_jours', label: 'Alerte âge pièce (jours)', type: 'number' },
+    { k: 'tv_refresh_min', label: 'Mode TV : rafraîchissement (min)', type: 'number' },
+    { k: 'tv_rotation_s', label: 'Mode TV : durée par écran (s)', type: 'number' },
+    { k: 'heures_photo', label: 'Heures des photos (ex. 06:00;13:30)', type: 'text' }
+  ];
+
+  function renderParams() {
+    var root = $('#view-params');
+    var meta = DATA.globalsMeta || {};
+    var html = '<div class="params-grid"><div class="pcard"><h3>Paramètres globaux (partagés)</h3>' + GLOBAL_FIELDS.map(function (f) {
+      var v = g(f.k), input;
+      if (f.type === 'year') input = '<select data-g="' + f.k + '">' + DATA.years.map(function (y) { return '<option value="' + esc(y.key) + '"' + (y.key === v ? ' selected' : '') + '>' + esc(y.label) + '</option>'; }).join('') + '</select>';
+      else if (f.type === 'unit') input = '<select data-g="' + f.k + '"><option value="pieces"' + (v === 'pieces' ? ' selected' : '') + '>Pièces</option><option value="emplacements"' + (v === 'emplacements' ? ' selected' : '') + '>Emplacements</option></select>';
+      else input = '<input type="' + (f.type === 'number' ? 'number" min="0' : 'text') + '" data-g="' + f.k + '" value="' + esc(v) + '">';
+      var m = meta[f.k];
+      return '<div class="pfield"><label>' + esc(f.label) + '</label>' + input + (m && m.by ? '<span class="who">modifié par ' + esc(m.by) + ' le ' + esc(m.at) + '</span>' : '') + '</div>';
+    }).join('') + '<div class="actions"><button type="button" class="btn" data-act="save-globals">Enregistrer les paramètres</button></div>' +
+      '<p class="deb-legend">Unité « emplacements » : AV = 1 pièce / emplacement, AR (C36 AR, C42 AR, C40 AR) = 2 pièces / emplacement. La jauge affiche toujours des pièces.</p></div>';
+
+    html += '<div class="pcard"><h3>Journal des modifications</h3><div id="journal">' + journalHtml() + '</div></div></div>';
+
+    // Mapping
+    var refsRows = [];
+    DATA.blocks.forEach(function (b) { b.refs.forEach(function (r) { refsRows.push({ r: r, b: b }); }); });
+    var options = blockOptions();
+    html += '<div class="band" style="margin-top:1rem"><span>MAPPING DES RÉFS</span><span class="band-sub">' + refsRows.length + ' réfs rattachées · ' + DATA.unmapped.length + ' non rattachée' + (DATA.unmapped.length > 1 ? 's' : '') + ' · onglet Mapping_Refs</span></div>';
+    html += '<div class="map-tools"><input type="text" id="new-ref" placeholder="Nouvelle réf (ex. E571.11163.200.01)"><select id="new-block">' + options + '</select>' +
+      '<select id="new-type">' + typeOptions('NOUVELLE') + '</select><label><input type="checkbox" id="new-aval" checked> à valider</label>' +
+      '<button type="button" class="btn btn-small" data-act="add-map">Ajouter</button></div>';
+    html += '<div class="scroll" style="max-height:28rem"><table class="tbl"><thead><tr><th>Réf</th><th>Bloc</th><th>Type</th><th>Version réf</th><th>À valider</th><th>Commentaire</th><th class="num">AJU</th><th class="num">À venir</th><th></th></tr></thead><tbody>';
+    DATA.unmapped.forEach(function (u) {
+      html += '<tr class="unmapped" data-ref="' + esc(u.ref) + '"><td class="mono">' + esc(u.ref) + '<br><small>' + esc(u.designation) + '</small></td>' +
+        '<td><select data-m="blockId"><option value="">— non rattachée —</option>' + options + '</select></td><td><select data-m="type">' + typeOptions('NOUVELLE') + '</select></td>' +
+        '<td><input type="text" data-m="versionRef" size="6"></td><td><input type="checkbox" data-m="aValider" checked></td><td><input type="text" data-m="comment" placeholder="Pourquoi ce rattachement ?"></td>' +
+        '<td class="num">' + n(u.aju) + '</td><td class="num">' + n(u.avenir) + '</td><td><button type="button" class="btn btn-small" data-act="save-map">Rattacher</button></td></tr>';
+    });
+    refsRows.sort(function (a, c) { return a.b.order - c.b.order || (c.r.isL1 - a.r.isL1); }).forEach(function (x) {
+      var r = x.r, b = x.b;
+      html += '<tr data-ref="' + esc(r.ref) + '"><td class="mono">' + esc(r.ref) + (r.isL1 ? '<br><small>réf L1 (capacité)</small>' : '') + '</td>' +
+        '<td><select data-m="blockId"' + (r.isL1 ? ' disabled title="La réf L1 est portée par le bloc (onglet Parametres_Blocs)"' : '') + '>' + blockOptions(b.id) + '</select></td>' +
+        '<td><select data-m="type">' + typeOptions(r.type) + '</select></td><td><input type="text" data-m="versionRef" size="6" value="' + esc(r.versionRef) + '"></td>' +
+        '<td><input type="checkbox" data-m="aValider"' + (r.aValider ? ' checked' : '') + '></td><td><input type="text" data-m="comment" value="' + esc(r.comment) + '"></td>' +
+        '<td class="num">' + n(r.aju) + '</td><td class="num">' + n(r.avenir) + '</td><td style="white-space:nowrap"><button type="button" class="btn btn-small" data-act="save-map">Enregistrer</button>' +
+        (r.isL1 ? '' : ' <button type="button" class="btn btn-small btn-danger" data-act="del-map" title="Retirer ce rattachement">×</button>') + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    root.innerHTML = html;
+    if (!JOURNAL) run('getJournal', 30).then(function (j) { JOURNAL = j; var el = $('#journal'); if (el) el.innerHTML = journalHtml(); }).catch(function () { JOURNAL = []; });
+  }
+
+  function journalHtml() {
+    if (!JOURNAL) return '<div class="sk" style="height:8rem"></div>';
+    if (!JOURNAL.length) return '<p class="deb-legend">Aucune modification enregistrée.</p>';
+    return '<div class="scroll" style="max-height:24rem"><table class="tbl"><thead><tr><th>Quand</th><th>Qui</th><th>Quoi</th><th>Avant → après</th></tr></thead><tbody>' +
+      JOURNAL.map(function (j) { return '<tr><td>' + esc(j.at) + '</td><td>' + esc(j.by) + '</td><td>' + esc(j.objet) + ' · ' + esc(j.champ) + '</td><td>' + esc(j.avant) + ' → <b>' + esc(j.apres) + '</b></td></tr>'; }).join('') +
+      '</tbody></table></div>';
+  }
+
+  function blockOptions(selected) {
+    return PROG_ORDER.map(function (p) {
+      var bl = DATA.blocks.filter(function (b) { return b.prog === p; });
+      if (!bl.length) return '';
+      return '<optgroup label="' + p + '">' + bl.map(function (b) {
+        return '<option value="' + esc(b.id) + '"' + (b.id === selected ? ' selected' : '') + '>' + esc(blockName(b)) + '</option>';
+      }).join('') + '</optgroup>';
+    }).join('');
+  }
+  function typeOptions(sel) {
+    return ['STANDARD', 'POSMOD', 'NOUVELLE', 'CJ', 'AUTRE'].map(function (t) { return '<option' + (t === sel ? ' selected' : '') + '>' + t + '</option>'; }).join('');
+  }
+
+  function mapRowValues(tr) {
+    var o = { ref: tr.getAttribute('data-ref') };
+    $all('[data-m]', tr).forEach(function (el) { o[el.getAttribute('data-m')] = el.type === 'checkbox' ? el.checked : el.value; });
+    return o;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Modales : réfs non rattachées, modification en masse                */
+  /* ------------------------------------------------------------------ */
+  function openModal(title, body, foot) {
+    $('#modal-title').textContent = title;
+    $('#modal-body').innerHTML = body;
+    $('#modal-foot').innerHTML = foot || '';
+    $('#modal').hidden = false;
+    var f = $('#modal-body select, #modal-body input, #modal-foot button');
+    if (f) f.focus();
+  }
+  function closeModal() { $('#modal').hidden = true; }
+
+  function openUnmapped() {
+    var options = blockOptions();
+    var body = '<p>Ces réfs sont aux postes BUFFER ou AJU dans ZZ84 mais ne sont rattachées à aucun bloc : leurs pièces ne sont comptées nulle part. Choisissez un bloc pour chacune.</p>' +
+      '<table class="tbl"><thead><tr><th>Réf</th><th>Désignation</th><th class="num">AJU</th><th class="num">À venir</th><th>Bloc</th><th>Type</th><th>À valider</th></tr></thead><tbody>' +
+      DATA.unmapped.map(function (u) {
+        return '<tr data-ref="' + esc(u.ref) + '"><td class="mono">' + esc(u.ref) + (u.inactiveBlock ? '<br><small>bloc inactif : ' + esc(u.inactiveBlock) + '</small>' : '') + '</td><td>' + esc(u.designation) + '</td><td class="num">' + n(u.aju) + '</td><td class="num">' + n(u.avenir) + '</td>' +
+          '<td><select data-m="blockId"><option value="">— choisir —</option>' + options + '</select></td><td><select data-m="type">' + typeOptions('NOUVELLE') + '</select></td>' +
+          '<td><input type="checkbox" data-m="aValider" checked></td></tr>';
+      }).join('') + '</tbody></table>';
+    openModal('Réfs non rattachées (' + DATA.unmapped.length + ')', body,
+      '<button type="button" class="btn btn-ghost" data-act="close-modal">Annuler</button><button type="button" class="btn" data-act="save-unmapped">Rattacher</button>');
+  }
+
+  function openMass() {
+    var list = filtered();
+    var body = '<p>La modification s\'applique aux <b>' + list.length + ' blocs</b> de la sélection filtrée. Valeurs en pièces, partagées par tous les utilisateurs.</p>' +
+      '<div class="mass-form"><label>Valeur à modifier<select id="mass-field"><option value="mini">Mini</option><option value="maxi">Maxi</option><option value="cap">Capacité</option></select></label>' +
+      '<label>Action<select id="mass-mode"><option value="value">Fixer à une valeur</option><option value="pct">Fixer à un % de la capacité</option><option value="default">Revenir à la valeur par défaut L1</option></select></label>' +
+      '<label>Valeur<input type="number" id="mass-value" min="0" step="1" value="4"></label></div><div id="mass-preview"></div>';
+    openModal('Modifier la sélection', body,
+      '<button type="button" class="btn btn-ghost" data-act="close-modal">Annuler</button><button type="button" class="btn" data-act="apply-mass">Appliquer</button>');
+    massPreview();
+  }
+
+  function massChanges() {
+    var field = $('#mass-field').value, mode = $('#mass-mode').value, val = Number($('#mass-value').value);
+    return filtered().map(function (b) {
+      var c = { blockId: b.id }, nv;
+      if (mode === 'default') { c[field] = null; nv = field === 'cap' ? b.capDefault : field === 'maxi' ? b.maxiDefault : b.miniDefault; }
+      else if (mode === 'pct') { nv = b.cap > 0 ? Math.ceil(val / 100 * b.cap) : 0; if (field === 'mini' && b.cap > 0) nv = Math.max(1, nv); c[field] = nv; }
+      else { nv = Math.round(val); c[field] = nv; }
+      var next = { cap: b.cap, maxi: b.maxi, mini: b.mini };
+      next[field] = nv;
+      c._b = b; c._from = b[field]; c._to = nv;
+      c._ok = next.mini >= 0 && next.mini <= next.maxi && next.maxi <= next.cap;
+      return c;
+    });
+  }
+  function massPreview() {
+    var ch = massChanges();
+    var bad = ch.filter(function (c) { return !c._ok; }).length;
+    $('#mass-preview').innerHTML = (bad ? '<p class="form-err">' + bad + ' bloc(s) ne respecteraient pas 0 ≤ mini ≤ maxi ≤ capacité et seront ignorés.</p>' : '') +
+      '<div class="scroll"><table class="tbl"><thead><tr><th>Bloc</th><th class="num">Actuel</th><th class="num">Nouveau</th><th>Contrôle</th></tr></thead><tbody>' +
+      ch.map(function (c) { return '<tr><td>' + esc(blockName(c._b)) + '</td><td class="num">' + c._from + '</td><td class="num"><b>' + c._to + '</b></td><td>' + (c._ok ? '✓' : '<span class="form-err">✖ incohérent</span>') + '</td></tr>'; }).join('') +
+      '</tbody></table></div>';
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Événements                                                          */
+  /* ------------------------------------------------------------------ */
+  function toggleRow(id) {
+    if (TV) return;
+    if (OPEN[id]) delete OPEN[id]; else OPEN[id] = true;
+    var row = $('#row-' + cssId(id));
+    var b = blockById(id);
+    if (!row || !b) return renderBuffer();
+    var det = $('#det-' + cssId(id));
+    if (det) det.parentNode.removeChild(det);
+    row.setAttribute('aria-expanded', String(!!OPEN[id]));
+    if (OPEN[id]) row.insertAdjacentHTML('afterend', detailHtml(b));
+  }
+
+  function setFilter(key, val) {
+    var arr = S[key], i = arr.indexOf(val);
+    if (i >= 0) arr.splice(i, 1); else arr.push(val);
+    renderAfterFilter();
+  }
+  function renderAfterFilter() {
+    renderKpis(); renderFilters(); renderView(); renderFooter(); saveState();
+  }
+
+  function bind() {
+    document.addEventListener('click', function (e) {
+      var t = e.target.closest ? e.target.closest('[data-act],[data-f],[data-view],[data-step],[data-debstep],.row,.modal-x') : null;
+      if (!t) { if (e.target === $('#modal')) closeModal(); return; }
+      if (t.classList.contains('modal-x')) return closeModal();
+      if (t.hasAttribute('data-f')) return setFilter(t.getAttribute('data-f'), t.getAttribute('data-v'));
+      if (t.classList.contains('tab')) { S.view = t.getAttribute('data-view'); renderTabs(); renderView(); saveState(); return; }
+      if (t.hasAttribute('data-step')) {
+        var box = t.closest('.settings'), id = box.getAttribute('data-id'), k = t.getAttribute('data-k');
+        var d = draftOf(blockById(id));
+        d[k] = Math.max(0, (Number(d[k]) || 0) + Number(t.getAttribute('data-step')));
+        d.touched[k] = true;
+        refreshSettings(id);
+        return;
+      }
+      if (t.hasAttribute('data-debstep')) { var inp = $('#deb-cap'); inp.value = Math.max(1, (Number(inp.value) || 0) + Number(t.getAttribute('data-debstep'))); return; }
+      if (t.classList.contains('row')) return toggleRow(t.getAttribute('data-id'));
+      var act = t.getAttribute('data-act');
+      if (act.indexOf('st:') === 0) {
+        var st = act.slice(3);
+        S.st = S.st.length === 1 && S.st[0] === st ? [] : [st];
+        S.view = 'buffer'; renderTabs(); renderAfterFilter(); return;
+      }
+      if (act.indexOf('view:') === 0) { S.view = act.slice(5); renderTabs(); renderView(); saveState(); return; }
+      if (act.indexOf('open:') === 0) {
+        var oid = act.slice(5), ob = blockById(oid);
+        S.view = 'buffer';
+        if (ob && !matches(ob)) { S.st = []; S.q = ''; if (S.prog.length && S.prog.indexOf(ob.prog) < 0) S.prog.push(ob.prog); }
+        OPEN[oid] = true; renderTabs(); renderAfterFilter();
+        var r = $('#row-' + cssId(oid)); if (r) r.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+      switch (act) {
+        case 'reset-filters': FILTER_KEYS.forEach(function (k) { S[k] = clone(DEFAULT_STATE[k]); }); S.q = ''; renderAfterFilter(); break;
+        case 'unmapped': openUnmapped(); break;
+        case 'close-modal': closeModal(); break;
+        case 'save-block': saveBlock(t.closest('.settings').getAttribute('data-id')); break;
+        case 'reset-block':
+          var rid = t.closest('.settings').getAttribute('data-id');
+          if (confirm('Réinitialiser capacité, mini, maxi et unité de ce bloc aux valeurs L1 ?')) submitBlocks([{ blockId: rid, reset: true }]);
+          break;
+        case 'save-debcap':
+          var v = Number($('#deb-cap').value);
+          if (!(v >= 1)) return toast('Capacité invalide', true);
+          run('saveGlobalParams', { debord_capacite: v }).then(function () { toast('Capacité du débord : ' + v + ' places'); JOURNAL = null; load(); }).catch(function (er) { toast(er.message, true); });
+          break;
+        case 'save-globals':
+          var vals = {};
+          $all('[data-g]').forEach(function (el) { if (String(el.value) !== String(g(el.getAttribute('data-g')))) vals[el.getAttribute('data-g')] = el.value; });
+          if (!Object.keys(vals).length) return toast('Aucune modification');
+          if (vals.annee_l1) S.year = vals.annee_l1;
+          run('saveGlobalParams', vals).then(function (res) { toast(res.saved + ' paramètre(s) enregistré(s)'); JOURNAL = null; load(); }).catch(function (er) { toast(er.message, true); });
+          break;
+        case 'save-map':
+          var mv = mapRowValues(t.closest('tr'));
+          if (!mv.blockId) { var dis = t.closest('tr').querySelector('select[data-m="blockId"]'); if (dis && dis.disabled) mv.blockId = dis.value; }
+          if (!mv.blockId) return toast('Choisissez un bloc', true);
+          run('saveMapping', [mv]).then(function () { toast('Rattachement enregistré : ' + mv.ref); JOURNAL = null; load(); }).catch(function (er) { toast(er.message, true); });
+          break;
+        case 'del-map':
+          var dref = t.closest('tr').getAttribute('data-ref');
+          if (!confirm('Retirer le rattachement de ' + dref + ' ? Ses pièces remonteront dans « Réfs non rattachées ».')) return;
+          run('saveMapping', [{ ref: dref, remove: true }]).then(function () { toast('Rattachement retiré'); JOURNAL = null; load(); }).catch(function (er) { toast(er.message, true); });
+          break;
+        case 'add-map':
+          var nr = $('#new-ref').value.trim();
+          if (!nr) return toast('Saisissez une réf', true);
+          run('saveMapping', [{ ref: nr, blockId: $('#new-block').value, type: $('#new-type').value, aValider: $('#new-aval').checked }])
+            .then(function () { toast('Réf ' + nr + ' rattachée'); JOURNAL = null; load(); }).catch(function (er) { toast(er.message, true); });
+          break;
+        case 'save-unmapped':
+          var entries = $all('#modal-body tr[data-ref]').map(mapRowValues).filter(function (x) { return x.blockId; });
+          if (!entries.length) return toast('Choisissez au moins un bloc', true);
+          run('saveMapping', entries).then(function () { closeModal(); toast(entries.length + ' réf(s) rattachée(s)'); JOURNAL = null; load(); }).catch(function (er) { toast(er.message, true); });
+          break;
+        case 'apply-mass':
+          var ch = massChanges().filter(function (c) { return c._ok; }).map(function (c) {
+            var o = { blockId: c.blockId };
+            ['cap', 'mini', 'maxi'].forEach(function (k) { if (Object.prototype.hasOwnProperty.call(c, k)) o[k] = c[k]; });
+            return o;
+          });
+          if (!ch.length) return toast('Aucun bloc valide à modifier', true);
+          submitBlocks(ch, closeModal);
+          break;
+        case 'snapshot':
+          t.disabled = true;
+          run('takeSnapshotManual').then(function (res) { toast('Photo enregistrée (' + res.rows + ' lignes)'); loadHistory(); }).catch(function (er) { t.disabled = false; toast(er.message, true); });
+          break;
+      }
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !$('#modal').hidden) return closeModal();
+      var row = e.target.classList && e.target.classList.contains('row') ? e.target : null;
+      if (row && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggleRow(row.getAttribute('data-id')); }
+    });
+
+    document.addEventListener('input', function (e) {
+      var t = e.target;
+      if (t.id === 'q') {
+        clearTimeout(t._deb);
+        t._deb = setTimeout(function () {
+          S.q = t.value.trim();
+          renderKpis(); renderView(); renderFooter(); saveState();
+          // met à jour les compteurs des puces sans perdre le focus de la recherche
+          $all('.chip').forEach(function (c) {
+            var key = c.getAttribute('data-f'), o = c.getAttribute('data-v');
+            var cnt = DATA.blocks.filter(function (b) { return matches(b, key) && (key === 'ver' ? (b.version === o || b.refs.some(function (r) { return r.versionRef === o; })) : blockVal(b, key) === o); }).length;
+            c.querySelector('.n').textContent = cnt;
+          });
+        }, 200);
+        return;
+      }
+      if (t.closest && t.closest('.settings') && t.hasAttribute('data-k') && t.tagName === 'INPUT') {
+        var id = t.closest('.settings').getAttribute('data-id');
+        var d = draftOf(blockById(id));
+        var k = t.getAttribute('data-k');
+        d[k] = Math.max(0, Math.round(Number(t.value) || 0));
+        d.touched[k] = true;
+        clearTimeout(t._deb);
+        t._deb = setTimeout(function () { refreshSettings(id); }, 350);
+      }
+      if (t.closest && t.closest('.mass-form')) massPreview();
+    });
+
+    document.addEventListener('change', function (e) {
+      var t = e.target;
+      if (t.id === 'year') { S.year = t.value; DRAFT = {}; load(); return; }
+      if (t.id === 'sort') { S.sort = t.value; renderView(); saveState(); return; }
+      if (t.id === 'print-size') { S.print = t.value; setPrintSize(); saveState(); return; }
+      if (t.id === 'h-scope') { histoScope = t.value; renderHisto(); return; }
+      if (t.id === 'h-days') { histoDays = Number(t.value); renderHisto(); return; }
+      if (t.closest && t.closest('.settings') && t.getAttribute('data-k') === 'unit') {
+        var id = t.closest('.settings').getAttribute('data-id');
+        draftOf(blockById(id)).unit = t.value;
+        refreshSettings(id);
+        return;
+      }
+      if (t.closest && t.closest('.mass-form')) massPreview();
+      if (t.closest && t.closest('tr[data-ref]')) t.closest('tr').classList.add('dirty');
+    });
+
+    $('#btn-refresh').onclick = function () { load(true); };
+    $('#btn-mass').onclick = openMass;
+    $('#btn-print').onclick = function () { setPrintSize(); window.print(); };
+  }
+
+  function setPrintSize() {
+    var st = $('#page-size');
+    if (!st) { st = document.createElement('style'); st.id = 'page-size'; document.head.appendChild(st); }
+    st.textContent = '@media print { @page { size: ' + (S.print === 'A3' ? 'A3' : 'A4') + ' landscape; margin: 8mm; } }';
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Mode TV : plein écran, rotation KPI + A320 / KPI + A321 / débord    */
+  /* ------------------------------------------------------------------ */
+  var TV_SLIDES = [{ progs: ['A320'], view: 'buffer', label: 'A320' }, { progs: ['A321'], view: 'buffer', label: 'A321' }, { progs: ['A320', 'A321'], view: 'debord', label: 'Débord' }];
+  function tvProgs() { return TV_SLIDES[tvSlide].progs; }
+
+  function tvRender() {
+    if (!DATA) return;
+    var sl = TV_SLIDES[tvSlide];
+    S.view = sl.view;
+    renderHeader(); renderAlerts(); renderKpis(); renderFooter();
+    ['buffer', 'debord', 'histo', 'params'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+    if (sl.view === 'buffer') renderBuffer(sl.progs);
+    else { var keep = S.prog; S.prog = sl.progs; renderDebord(); S.prog = keep; }
+    $('#tv-dots').innerHTML = TV_SLIDES.map(function (s, i) { return '<span class="' + (i === tvSlide ? 'on' : '') + '" title="' + s.label + '"></span>'; }).join('');
+    tvFit();
+  }
+
+  /** Ajuste la taille de police pour que l'écran tienne sans défilement (12 blocs A321 sur un écran 1080p). */
+  function tvFit() {
+    var root = document.documentElement, size = 16;
+    root.style.fontSize = size + 'px';
+    while (document.documentElement.scrollHeight > window.innerHeight + 2 && size > 9) {
+      size -= 0.5;
+      root.style.fontSize = size + 'px';
+    }
+  }
+  window.addEventListener('resize', function () { if (TV) tvFit(); });
+
+  function startTv() {
+    var tick = function () { $('#tv-clock').textContent = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }); };
+    tick(); setInterval(tick, 15000);
+    var rotate = function () {
+      tvSlide = (tvSlide + 1) % TV_SLIDES.length;
+      tvRender();
+      tvTimer = setTimeout(rotate, Math.max(5, Number(g('tv_rotation_s')) || 20) * 1000);
+    };
+    var refresh = function () {
+      run('getDashboardData', { year: S.year || null }).then(function (d) { DATA = d; tvRender(); }).catch(function () { /* on garde l'affichage précédent */ });
+      setTimeout(refresh, Math.max(1, Number(g('tv_refresh_min')) || 5) * 60000);
+    };
+    run('getDashboardData', { year: S.year || null }).then(function (d) {
+      DATA = d; tvSlide = 0; tvRender();
+      tvTimer = setTimeout(rotate, Math.max(5, Number(g('tv_rotation_s')) || 20) * 1000);
+      setTimeout(refresh, Math.max(1, Number(g('tv_refresh_min')) || 5) * 60000);
+      try { if (document.documentElement.requestFullscreen) document.addEventListener('click', function fs() { document.documentElement.requestFullscreen().catch(function () {}); document.removeEventListener('click', fs); }); } catch (e) { /* */ }
+    }).catch(function (e) {
+      showFatal(e.message);
+      setTimeout(function () { location.reload(); }, 60000);
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Démarrage                                                           */
+  /* ------------------------------------------------------------------ */
+  function init() {
+    bind();
+    if (TV) {
+      try { google.script.url.getLocation(function (loc) { var p = (loc && loc.parameter) || {}; if (p.year) S.year = p.year; startTv(); }); } catch (e) { startTv(); }
+      return;
+    }
+    loadState(function () {
+      renderTabs();
+      setPrintSize();
+      load(false);
+    });
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
+</script>

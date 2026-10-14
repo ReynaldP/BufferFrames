@@ -1,0 +1,78 @@
+1. setup()
+  [Logger] Classeur Paramètres prêt : https://docs.google.com/spreadsheets/d/params-1792002038069
+  OK   les 5 onglets Paramètres sont créés
+  OK   onglet par défaut supprimé
+  OK   28 blocs pré-remplis
+  OK   hypothèses marquées « À valider » : D571.30422.200.00, D571.32210.200.40, E571.11161.200.00, D571.32210.202.40, E571.11161.202.00, E571.11163.200.01, E571.11165.200.01
+  [Logger] Classeur Paramètres prêt : https://docs.google.com/spreadsheets/d/params-1792002038069
+  OK   setup() idempotent (pas de doublon)
+2. getDashboardData() vs section 5
+  OK   horodatage SAP : 14/10/2026 à 04:41
+  OK   A320-NEOCEO-C36AVG : 3 / 9 (attendu 3 / 9)
+  OK   A320-NEOCEO-C36AVD : 9 / 0 (attendu 9 / 0)
+  OK   A320-NEOCEO-C36ARG : 4 / 0 (attendu 4 / 0)
+  OK   A320-NEOCEO-C36ARD : 4 / 0 (attendu 4 / 0)
+  OK   A320-NEOCEO-C42AVG : 1 / 4 (attendu 1 / 4)
+  OK   A320-NEOCEO-C42AVD : 0 / 4 (attendu 0 / 4)
+  OK   A320-NEOCEO-C42ARG : 0 / 2 (attendu 0 / 2)
+  OK   A320-NEOCEO-C42ARD : 1 / 2 (attendu 1 / 2)
+  OK   A321-ACF-C36AVG : 9 / 4 (attendu 9 / 4)
+  OK   A321-ACF-C36AVD : 8 / 6 (attendu 8 / 6)
+  OK   A321-ACF-C36ARG : 12 / 8 (attendu 12 / 8)
+  OK   A321-ACF-C36ARD : 12 / 8 (attendu 12 / 8)
+  OK   A321-ACF-C42AVG : 6 / 0 (attendu 6 / 0)
+  OK   A321-ACF-C42AVD : 4 / 0 (attendu 4 / 0)
+  OK   A321-ACF-C42ARG : 3 / 4 (attendu 3 / 4)
+  OK   A321-ACF-C42ARD : 13 / 4 (attendu 13 / 4)
+  OK   A321-XLR-C42AVG : 10 / 0 (attendu 10 / 0)
+  OK   A321-XLR-C42AVD : 6 / 0 (attendu 6 / 0)
+  OK   A321-XLR-C42ARG : 0 / 1 (attendu 0 / 1)
+  OK   A321-XLR-C42ARD : 0 / 1 (attendu 0 / 1)
+  OK   totaux A320 + A321 : AJU 105, À venir 57
+  OK   A330 AJU = 6
+  OK   A330 : C40 AR G 2, C40 AV G 2, C40 AV D 2
+  OK   aucune réf non rattachée
+  OK   en-têtes répétés filtrés : 7
+  OK   doublon L1 F571.12262 : ligne LR COMMUN gardée
+  OK   CJ comptée dans A320 C42 AV G et marquée à valider
+  OK   XLR C42 AV G : DÉBORD +8 (capacité L1 = 2)
+  OK   débord total = Σ excédents = 15
+  OK   débord trié FIFO (plus ancienne d'abord)
+  OK   statuts ROUGE / VERT
+  OK   taille JSON : 45 Ko
+3. cache
+  OK   second appel servi depuis le cache
+  OK   Actualiser (force) recalcule
+4. années / unité
+  OK   année 2024 : A321 C36 AV G capacité 11
+  OK   année 2028+ : C47 G capacité 4
+5. saveBlockParams
+  OK   modif en masse mini 4 sur A321 C42 AR
+  OK   cache vidé après écriture
+  OK   mini surchargé = 4
+  OK   contrôle mini ≤ maxi refusé : A321 XLR C42 AV G : contrôle 0 ≤ mini (5) ≤ maxi (2) ≤ capacité (2) non respecté
+  OK   XLR C42 AV G capacité 12 / maxi 10 → PLEIN
+  OK   Réinitialiser aux valeurs L1
+  OK   unité emplacements sur un AR : 14 empl. × 2 = 28 pièces
+6. saveGlobalParams / journal
+  [Logger] Déclencheurs installés : 06:00, 13:30, 21:00
+  OK   capacité débord 40, modifiée par testeur@airbus.com le 14/10/2026 20:20
+  OK   mini % 30 → ceil(0,3 × 13) = 4
+  OK   heures de photo modifiées → 3 déclencheurs réinstallés
+  OK   journal : 10 entrées, ancienne / nouvelle valeur tracées
+7. saveMapping / réfs non rattachées
+  OK   réf retirée du mapping → remonte dans « non rattachées »
+  OK   rattachement depuis l'appli (réf normalisée)
+8. historique
+  [Logger] Déclencheurs installés : 06:00, 13:30, 21:00
+  OK   installTriggers()
+  OK   photo : 4 lignes KPI + 28 blocs = 32
+  OK   getHistoryData : 2 points KPI, 28 sparklines
+9. robustesse
+  OK   colonne décalée + nombres en texte + réfs sales : 105 / 57
+  OK   DATA Poste absent → table de secours + avertissement
+  OK   message clair : Onglet « ZZ84 » introuvable dans « Pilotage_Ferrure_PC Frame ».
+  OK   L1 inaccessible → avertissement, appli toujours utilisable
+  [Logger] Déclencheurs installés : 06:00, 13:30
+
+RÉSULTAT : tous les tests passent

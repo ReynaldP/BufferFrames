@@ -1,0 +1,44 @@
+Buffer AJU Frames : contrôle de validité
+Extraction SAP : 14/10/2026 à 04:41
+Postes BUFFER : 37SBEL1
+Postes AJU    : 37S0223, 37S0225, 53B0223, 53B0225
+Lignes d'en-tête répétées filtrées : 7
+Doublons L1 ignorés : F571.12262.202.01 (LR NEO), F571.12262.203.01 (LR NEO)
+Année L1 : 2026-2028
+
+Prog Version  Bloc      Flux      AJU  Ven   Cap  Mini  Maxi   Déb  Statut  Contrôle
+A320 NEO/CEO  C36 AV G  Amboise     3    9     6     2     6     0  VERT    OK
+A320 NEO/CEO  C36 AV D  Amboise     9    0     6     2     6     3  DÉBORD  OK
+A320 NEO/CEO  C36 AR G  M5          4    0     6     2     6     0  VERT    OK
+A320 NEO/CEO  C36 AR D  M5          4    0     6     2     6     0  VERT    OK
+A320 NEO/CEO  C42 AV G  Amboise     1    4     6     2     6     0  ROUGE   OK
+A320 NEO/CEO  C42 AV D  Amboise     0    4     6     2     6     0  ROUGE   OK
+A320 NEO/CEO  C42 AR G  T5X→H5      0    2     6     2     6     0  ROUGE   OK
+A320 NEO/CEO  C42 AR D  T5X→H5      1    2     6     2     6     0  ROUGE   OK
+A321 ACF      C36 AV G  Amboise     9    4    13     4    13     0  VERT    OK
+A321 ACF      C36 AV D  Amboise     8    6    13     4    13     0  VERT    OK
+A321 ACF      C36 AR G  M5         12    8    14     4    14     0  VERT    OK
+A321 ACF      C36 AR D  M5         12    8    14     4    14     0  VERT    OK
+A321 ACF      C42 AV G  M5          6    0    14     4    14     0  VERT    OK
+A321 ACF      C42 AV D  M5          4    0    14     4    14     0  VERT    OK
+A321 ACF      C42 AR G  T5X→H5      3    4    14     4    14     0  ROUGE   OK
+A321 ACF      C42 AR D  T5X→H5     13    4    14     4    14     0  VERT    OK
+A321 XLR      C42 AV G  M5         10    0     2     1     2     8  DÉBORD  OK
+A321 XLR      C42 AV D  M5          6    0     2     1     2     4  DÉBORD  OK
+A321 XLR      C42 AR G  T5X→H5      0    1     2     1     2     0  ROUGE   OK
+A321 XLR      C42 AR D  T5X→H5      0    1     2     1     2     0  ROUGE   OK
+A330 NEO      C40 AV G  M5          2    0     2     1     2     0  PLEIN   OK
+A330 NEO      C40 AV D  M5          2    0     2     1     2     0  PLEIN   OK
+A330 CEO      C40 AV G  M5          0    0     0     0     0     0  PLEIN   OK
+A330 CEO      C40 AV D  M5          0    0     0     0     0     0  PLEIN   OK
+A330 COMMUN   C40 AR G  V4          2    0     2     1     2     0  PLEIN   OK
+A330 COMMUN   C40 AR D  V4          0    0     2     1     2     0  ROUGE   OK
+A330 NEO/CEO  C47 G     M5          0    0     2     1     2     0  ROUGE   OK
+A330 NEO/CEO  C47 D     M5          0    0     2     1     2     0  ROUGE   OK
+
+Totaux A320 + A321 : AJU = 105, À venir = 57 (attendu 105 / 57)
+Totaux A330        : AJU = 6, À venir = 0 (attendu AJU 6)
+Débord total (excédents > capacité) : 15
+Réfs BUFFER/AJU non rattachées : aucune
+
+RÉSULTAT : CONFORME

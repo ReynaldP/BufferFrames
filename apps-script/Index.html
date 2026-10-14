@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Buffer AJU Frames</title>
+  <?!= include('Styles'); ?>
+</head>
+<body class="<?= mode === 'tv' ? 'tv' : 'app' ?>">
+  <div class="print-head" aria-hidden="true">
+    <b>Buffer AJU Frames</b> · <span id="print-stamp"></span> · <span id="print-filters"></span>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="atlantic">ATLANTIC</span>
+      <h1>Buffer AJU Frames</h1>
+    </div>
+    <div class="stamp" id="stamp" aria-live="polite"><span class="sk sk-text"></span></div>
+    <div class="top-actions">
+      <span class="amber">Airbus Amber</span>
+      <label class="year-select no-tv">
+        <span>Année L1</span>
+        <select id="year" aria-label="Année L1 utilisée pour les capacités"></select>
+      </label>
+      <button type="button" id="btn-refresh" class="btn btn-light no-tv" title="Relire les Google Sheets (vide le cache)">
+        <span class="ico" aria-hidden="true">⟳</span> Actualiser
+      </button>
+      <span class="tv-clock only-tv" id="tv-clock"></span>
+    </div>
+  </header>
+
+  <div id="alerts" class="alerts"></div>
+
+  <section id="kpis" class="kpis" aria-label="Indicateurs">
+    <div class="kpi sk"></div><div class="kpi sk"></div><div class="kpi sk"></div><div class="kpi sk"></div>
+    <div class="kpi sk"></div><div class="kpi sk"></div>
+  </section>
+
+  <nav class="toolbar no-tv" aria-label="Vues">
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-view="buffer" class="tab">Buffer</button>
+      <button type="button" role="tab" data-view="debord" class="tab">Débord</button>
+      <button type="button" role="tab" data-view="histo" class="tab">Historique</button>
+      <button type="button" role="tab" data-view="params" class="tab">Réglages</button>
+    </div>
+    <div class="tool-right">
+      <label class="sort-select">
+        <span>Tri</span>
+        <select id="sort" aria-label="Tri des blocs">
+          <option value="crit">Criticité</option>
+          <option value="bloc">Bloc</option>
+          <option value="fill-asc">Remplissage ↑</option>
+          <option value="fill-desc">Remplissage ↓</option>
+        </select>
+      </label>
+      <button type="button" id="btn-mass" class="btn btn-ghost" title="Modifier mini / maxi / capacité de tous les blocs filtrés">✎ Modifier la sélection</button>
+      <div class="print-group">
+        <select id="print-size" aria-label="Format d'impression">
+          <option value="A4">A4</option>
+          <option value="A3">A3</option>
+        </select>
+        <button type="button" id="btn-print" class="btn btn-ghost" title="Imprimer ou enregistrer en PDF (vue filtrée)">⎙ Imprimer / PDF</button>
+      </div>
+    </div>
+  </nav>
+
+  <section id="filters" class="filters no-tv" aria-label="Filtres"></section>
+
+  <main>
+    <section id="view-buffer" class="view" aria-label="Niveaux par bloc">
+      <div class="sk-rows">
+        <div class="sk sk-band"></div>
+        <div class="sk sk-row"></div><div class="sk sk-row"></div><div class="sk sk-row"></div>
+        <div class="sk sk-row"></div><div class="sk sk-row"></div><div class="sk sk-row"></div>
+      </div>
+    </section>
+    <section id="view-debord" class="view" aria-label="Zone de débord" hidden></section>
+    <section id="view-histo" class="view" aria-label="Historique" hidden></section>
+    <section id="view-params" class="view no-tv" aria-label="Réglages" hidden></section>
+  </main>
+
+  <footer class="footer">
+    <div class="foot-left" id="foot-left"></div>
+    <div class="tv-dots only-tv" id="tv-dots"></div>
+    <div class="wordmark" aria-label="Airbus">AIRBUS</div>
+  </footer>
+
+  <div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" hidden>
+    <div class="modal-box">
+      <div class="modal-head"><h2 id="modal-title"></h2><button type="button" class="modal-x" aria-label="Fermer">×</button></div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-foot" id="modal-foot"></div>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script>window.APP_MODE = '<?= mode ?>';</script>
+  <?!= include('App.js'); ?>
+</body>
+</html>

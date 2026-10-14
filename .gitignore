@@ -1,0 +1,14 @@
+# Documents et extractions internes (Airbus Amber) : ne jamais publier
+*.xlsx
+*.xls
+*.pdf
+*.pptx
+*.jpeg
+*.jpg
+*.png
+
+# Fichiers générés par les contrôles locaux
+sheets.json
+demo.json
+preview_*.html
+__pycache__/
