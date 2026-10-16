@@ -16,9 +16,12 @@ function takeSnapshot() {
     rows.push([now, 'KPI', scope, scope === 'ALL' ? 'Tous programmes' : scope, k.aju, k.avenir, k.cap, '', '', '',
       k.debord, Math.round(k.fill * 1000) / 10, k.debord, k.rouge]);
   });
+  var rackExcess = {};
+  data.racks.forEach(function (r) { rackExcess[r.id] = r.excess; });
+  // Une ligne par variante ; statut et excédent sont ceux du rack partagé
   data.blocks.forEach(function (b) {
     rows.push([now, 'BLOC', b.id, blockLabel_(b), b.aju, b.avenir, b.cap, b.mini, b.maxi, b.status,
-      b.excess, b.cap > 0 ? Math.round(b.aju / b.cap * 1000) / 10 : '', '', '']);
+      rackExcess[b.rackId] || 0, b.cap > 0 ? Math.round(b.aju / b.cap * 1000) / 10 : '', '', '']);
   });
   sh.getRange(sh.getLastRow() + 1, 1, rows.length, HEAD_HISTO.length).setValues(rows);
   return { rows: rows.length, at: nowStr_() };

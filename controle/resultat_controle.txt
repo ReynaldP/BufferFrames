@@ -38,7 +38,17 @@ A330 NEO/CEO  C47 D     M5          0    0     2     1     2     0  ROUGE   OK
 
 Totaux A320 + A321 : AJU = 105, À venir = 57 (attendu 105 / 57)
 Totaux A330        : AJU = 6, À venir = 0 (attendu AJU 6)
-Débord total (excédents > capacité) : 15
+(Débord si chaque variante avait son propre rack : 15)
+
+Racks partagés (capacité, mini et maxi additionnés) :
+  A320 C36 AV D  NEO/CEO        AJU   9 /   6  mini  2  maxi  6  DÉBORD  débord 3
+  A321 C42 AV G  ACF + XLR      AJU  16 /  16  mini  5  maxi 16  PLEIN   débord 0
+  A321 C42 AV D  ACF + XLR      AJU  10 /  16  mini  5  maxi 16  VERT    débord 0
+  A321 C42 AR G  ACF + XLR      AJU   3 /  16  mini  5  maxi 16  ROUGE   débord 0
+  A321 C42 AR D  ACF + XLR      AJU  13 /  16  mini  5  maxi 16  VERT    débord 0
+  A330 C40 AV G  NEO + CEO      AJU   2 /   2  mini  1  maxi  2  PLEIN   débord 0
+  A330 C40 AV D  NEO + CEO      AJU   2 /   2  mini  1  maxi  2  PLEIN   débord 0
+Débord total (racks partagés) : 3
 Réfs BUFFER/AJU non rattachées : aucune
 
 RÉSULTAT : CONFORME

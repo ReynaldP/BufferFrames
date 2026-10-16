@@ -295,7 +295,27 @@ def main():
 
     print("\nTotaux A320 + A321 : AJU = %d, À venir = %d (attendu 105 / 57)" % tuple(tot["A320+A321"]))
     print("Totaux A330        : AJU = %d, À venir = %d (attendu AJU 6)" % tuple(tot["A330"]))
-    print("Débord total (excédents > capacité) : %d" % debord)
+    print("(Débord si chaque variante avait son propre rack : %d)" % debord)
+
+    # Racks physiques : les variantes d'un même bloc (A321 ACF + XLR, A330 NEO + CEO) partagent la place
+    racks = {}
+    for key, b in blocs.items():
+        cap = caps.get(norm_ref(b["ref_l1"]), 0)
+        mini = max(1, math.ceil(0.25 * cap)) if cap > 0 else 0
+        r = racks.setdefault((key[0], key[2]), {"versions": [], "aju": 0, "avenir": 0, "cap": 0, "mini": 0, "maxi": 0})
+        r["versions"].append(key[1])
+        for f, v in (("aju", b["aju"]), ("avenir", b["avenir"]), ("cap", cap), ("mini", mini), ("maxi", cap)):
+            r[f] += v
+    print("\nRacks partagés (capacité, mini et maxi additionnés) :")
+    rack_debord = 0
+    for (prog, bloc), r in racks.items():
+        exc = max(0, r["aju"] - r["cap"])
+        rack_debord += exc
+        if len(r["versions"]) > 1 or exc:
+            print("  %-4s %-9s %-14s AJU %3d / %3d  mini %2d  maxi %2d  %-7s débord %d" % (
+                prog, bloc, " + ".join(r["versions"]), r["aju"], r["cap"], r["mini"], r["maxi"],
+                statut_bloc(r["aju"], r["mini"], r["maxi"], r["cap"]), exc))
+    print("Débord total (racks partagés) : %d" % rack_debord)
     print("Réfs BUFFER/AJU non rattachées : %s" % (unmapped or "aucune"))
     ok_all &= tot["A320+A321"] == [105, 57] and tot["A330"][0] == 6 and not unmapped
     print("\nRÉSULTAT : %s" % ("CONFORME" if ok_all else "NON CONFORME"))

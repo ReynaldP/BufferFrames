@@ -168,8 +168,17 @@ check(d.stats.repeatedHeaders === 7, 'en-têtes répétés filtrés : ' + d.stat
 check(byId['A330-COMMUN-C40ARG'].cap === 2 && d.warnings.some((w) => /Doublon L1/.test(w.msg)), 'doublon L1 F571.12262 : ligne LR COMMUN gardée');
 const c42avg = byId['A320-NEOCEO-C42AVG'];
 check(c42avg.refs.some((r) => r.ref === 'D571.30422.200.00' && r.aju === 1 && r.aValider), 'CJ comptée dans A320 C42 AV G et marquée à valider');
-check(byId['A321-XLR-C42AVG'].status === 'DEBORD' && byId['A321-XLR-C42AVG'].excess === 8, 'XLR C42 AV G : DÉBORD +8 (capacité L1 = 2)');
-check(d.debord.total === d.kpis.ALL.debord && d.debord.total === 15, 'débord total = Σ excédents = ' + d.debord.total);
+const rk = Object.fromEntries(d.racks.map((r) => [r.id, r]));
+check(d.racks.length === 22, 'racks physiques : ' + d.racks.length + ' (28 variantes)');
+const r42 = rk['A321-C42AVG'];
+check(r42 && r42.blockIds.length === 2 && r42.cap === 16 && r42.aju === 16 && r42.mini === 5 && r42.maxi === 16,
+  'rack A321 C42 AV G partagé ACF + XLR : AJU 16 / capacité 14 + 2 = 16, mini 4 + 1, maxi 14 + 2');
+check(r42.status === 'PLEIN' && r42.excess === 0 && byId['A321-XLR-C42AVG'].status === 'PLEIN', 'XLR 10 pcs absorbées par la place ACF : rack PLEIN, pas de débord');
+check(rk['A321-C42AVD'].status === 'VERT' && rk['A321-C42AVD'].excess === 0, 'rack A321 C42 AV D : 10 / 16 VERT');
+check(rk['A321-C42ARG'].aju === 3 && rk['A321-C42ARG'].avenir === 5 && rk['A321-C42ARG'].status === 'ROUGE', 'rack A321 C42 AR G : 3 / 16, à venir 5, ROUGE');
+check(rk['A330-C40AVG'].cap === 2 && rk['A330-C40AVG'].status === 'PLEIN', 'rack A330 C40 AV G partagé NEO + CEO : 2 / 2 PLEIN');
+check(d.debord.total === d.kpis.ALL.debord && d.debord.total === 3 && d.debord.pieces.every((p) => p.rackId === 'A320-C36AVD'),
+  'débord total = Σ excédents des racks = ' + d.debord.total + ' (A320 C36 AV D)');
 const ages = d.debord.pieces.map((p) => p.age);
 check(ages.every((a, i) => i === 0 || ages[i - 1] >= a), 'débord trié FIFO (plus ancienne d\'abord)');
 check(byId['A320-NEOCEO-C42AVD'].status === 'ROUGE' && byId['A321-ACF-C36AVG'].status === 'VERT', 'statuts ROUGE / VERT');
@@ -197,7 +206,9 @@ check(r.errors.length === 1, 'contrôle mini ≤ maxi refusé : ' + (r.errors[0]
 r = ctx.saveBlockParams([{ blockId: 'A321-XLR-C42AVG', cap: 12, maxi: 10, mini: 3 }]);
 d3 = ctx.getDashboardData({});
 const x = d3.blocks.find((b) => b.id === 'A321-XLR-C42AVG');
-check(r.saved.length === 1 && x.cap === 12 && x.maxi === 10 && x.status === 'PLEIN' && x.excess === 0, 'XLR C42 AV G capacité 12 / maxi 10 → PLEIN');
+const xr = d3.racks.find((rr) => rr.id === 'A321-C42AVG');
+check(r.saved.length === 1 && x.cap === 12 && x.maxi === 10 && xr.cap === 26 && xr.maxi === 24 && xr.status === 'VERT',
+  'XLR capacité 12 / maxi 10 → rack 26 places, maxi 24 → VERT');
 ctx.saveBlockParams([{ blockId: 'A321-XLR-C42AVG', reset: true }]);
 check(ctx.getDashboardData({}).blocks.find((b) => b.id === 'A321-XLR-C42AVG').cap === 2, 'Réinitialiser aux valeurs L1');
 ctx.saveBlockParams([{ blockId: 'A321-ACF-C36ARG', unit: 'emplacements' }]);
@@ -230,6 +241,20 @@ ctx.takeSnapshot();
 check(s.rows === 32, 'photo : 4 lignes KPI + 28 blocs = ' + s.rows);
 const h = ctx.getHistoryData(30);
 check(h.kpi.ALL.length === 2 && Object.keys(h.blocks).length === 28, 'getHistoryData : ' + h.kpi.ALL.length + ' points KPI, ' + Object.keys(h.blocks).length + ' sparklines');
+
+console.log('8b. colonne Rack');
+const shB = pss.getSheetByName('Parametres_Blocs');
+const rackCol = shB.data[0].indexOf('Rack');
+const xlrRow = shB.data.findIndex((row) => row[0] === 'A321-XLR-C42AVG');
+check(rackCol === 16 && shB.data[xlrRow][rackCol] === 'A321-C42AVG', 'colonne Rack pré-remplie (programme + bloc)');
+shB.data[xlrRow][rackCol] = 'A321-C42AVG-XLR';
+let dr = ctx.getDashboardData({ force: true });
+check(dr.racks.find((rr) => rr.id === 'A321-C42AVG-XLR').excess === 8, 'Rack distinct saisi → XLR repart seul : débord +8');
+shB.data.forEach((row) => row.splice(rackCol, 1)); // ancien classeur sans colonne Rack
+dr = ctx.getDashboardData({ force: true });
+check(dr.racks.length === 22 && dr.debord.total === 3, 'classeur sans colonne Rack → regroupement par défaut');
+ctx.setup();
+check(shB.data[0].indexOf('Rack') >= 0, 'setup() ajoute l\'en-tête Rack manquant');
 
 console.log('9. robustesse');
 const zz = books['1GXpxmUtseSCqkyI6hznbxlMjcb7RoEDe5GSPcjP2pnk'].getSheetByName('ZZ84');

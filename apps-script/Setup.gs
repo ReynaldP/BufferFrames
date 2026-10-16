@@ -12,7 +12,7 @@ var SH_JOURNAL = 'Journal';
 
 var HEAD_GLOBAUX = ['Clé', 'Valeur', 'Libellé', 'Modifié par', 'Modifié le'];
 var HEAD_BLOCS = ['Bloc ID', 'Programme', 'Version', 'Bloc', 'Cadre', 'AV/AR', 'Côté', 'Flux', 'Réf L1',
-  'Capacité', 'Unité', 'Mini', 'Maxi', 'Actif', 'Surcharge', 'Ordre'];
+  'Capacité', 'Unité', 'Mini', 'Maxi', 'Actif', 'Surcharge', 'Ordre', 'Rack'];
 var HEAD_MAPPING = ['Réf', 'Bloc ID', 'Type', 'Version réf', 'À valider', 'Commentaire', 'Modifié par', 'Modifié le'];
 var HEAD_HISTO = ['Horodatage', 'Type', 'Clé', 'Libellé', 'AJU', 'À venir', 'Capacité', 'Mini', 'Maxi',
   'Statut', 'Excédent', 'Remplissage %', 'Débord total', 'Nb rouges'];
@@ -79,6 +79,14 @@ function makeBlockId_(prog, version, bloc) {
     .join('-').toUpperCase();
 }
 
+/**
+ * Rack physique par défaut : programme + bloc (« A321-C42AVG »).
+ * Les variantes d'un même rack (A321 ACF + XLR, A330 NEO + CEO) partagent la capacité.
+ */
+function makeRackId_(prog, bloc) {
+  return (String(prog) + '-' + String(bloc).replace(/\s+/g, '')).toUpperCase();
+}
+
 /** Décompose « C42 AV G » → {cadre:'C42', avar:'AV', cote:'G'} (C47 G → avar ''). */
 function parseBloc_(bloc) {
   var t = String(bloc).trim().toUpperCase().split(/\s+/);
@@ -110,9 +118,15 @@ function setup() {
     return DEFAULT_BLOCKS.map(function (b, i) {
       var p = parseBloc_(b[2]);
       return [makeBlockId_(b[0], b[1], b[2]), b[0], b[1], b[2], p.cadre, p.avar, p.cote, b[3], b[4],
-        '', '', '', '', 'OUI', 'NON', i + 1];
+        '', '', '', '', 'OUI', 'NON', i + 1, makeRackId_(b[0], b[2])];
     });
   });
+  // Mise à niveau d'un classeur créé avant l'ajout de la colonne Rack (vide = programme + bloc)
+  var shBlocs = ss.getSheetByName(SH_BLOCS);
+  var heads = shBlocs.getRange(1, 1, 1, Math.max(shBlocs.getLastColumn(), 1)).getValues()[0].map(normHead_);
+  if (heads.indexOf('rack') < 0) {
+    shBlocs.getRange(1, heads.length + 1).setValue('Rack').setFontWeight('bold').setFontColor('#FFFFFF').setBackground('#00205B');
+  }
 
   ensureSheet_(ss, SH_MAPPING, HEAD_MAPPING, function () {
     var rows = [], who = currentUser_(), when = nowStr_();

@@ -21,7 +21,7 @@
   var FAM_COLORS = { 'A320-C42': '#84BD00', 'A321-C42': '#005587', 'A320-C36': '#E07AAE', 'A321-C36': '#FE5000', 'A330-C40': '#0085AD', 'A330-C47': '#859199' };
   var FAM_LIGHT = { 'A320-C42': true, 'A321-C36': true };
 
-  var DEFAULT_STATE = { prog: ['A320', 'A321'], ver: [], cadre: [], avar: [], cote: [], flux: [], st: [], q: '', sort: 'crit', view: 'buffer', year: '', print: 'A4' };
+  var DEFAULT_STATE = { prog: ['A320', 'A321'], ver: [], cadre: [], avar: [], cote: [], flux: [], st: [], q: '', sort: 'crit', view: 'buffer', year: '', print: 'A4', filtersOpen: false };
   var S = clone(DEFAULT_STATE);
   var DATA = null, HISTO = null, JOURNAL = null;
   var OPEN = {}, DRAFT = {}, MAP_DRAFT = {};
@@ -132,8 +132,7 @@
     run('getHistoryData', 90).then(function (h) {
       HISTO = h;
       if (S.view === 'histo') renderHisto();
-      $all('.spark-slot').forEach(function (el) { el.innerHTML = sparkSvg(el.getAttribute('data-id'), 60, 16); });
-      Object.keys(OPEN).forEach(function (id) { var el = $('#spark-' + cssId(id)); if (el) el.innerHTML = sparkDetail(id); });
+      if (DATA) DATA.blocks.forEach(function (b) { var el = $('#spark-' + cssId(b.id)); if (el) el.innerHTML = sparkDetail(b.id); });
     }).catch(function () { HISTO = { kpi: {}, blocks: {}, error: true }; });
   }
 
@@ -172,14 +171,42 @@
   }
   function filtered() { return DATA ? DATA.blocks.filter(function (b) { return matches(b); }) : []; }
 
-  function kpisOf(blocks) {
-    var k = { blocks: blocks.length, aju: 0, cap: 0, avenir: 0, rouge: 0, vert: 0, plein: 0, debordBlocks: 0, debord: 0, oldest: null, ageAlert: 0 };
+  /**
+   * Une ligne = un rack physique (calculé côté serveur) : les variantes d'un même bloc (A321 ACF + XLR,
+   * A330 NEO + CEO) partagent la place. Capacité / mini / maxi du rack = somme des variantes,
+   * statut et débord calculés sur le rack. Un rack est affiché dès qu'une de ses variantes passe les filtres.
+   */
+  function rackById(id) { return (DATA.racks || []).filter(function (r) { return r.id === id; })[0]; }
+  function groupsOf(blocks) {
+    var seen = {}, out = [];
     blocks.forEach(function (b) {
-      k.aju += b.aju; k.cap += b.cap; k.avenir += b.avenir; k.debord += b.excess;
-      if (b.status === 'ROUGE') k.rouge++; else if (b.status === 'VERT') k.vert++; else if (b.status === 'PLEIN') k.plein++; else k.debordBlocks++;
-      if (b.aju > 0 && (!k.oldest || b.ageMax > k.oldest.age)) k.oldest = { age: b.ageMax, blockId: b.id, label: blockName(b) };
-      if (b.aju > 0 && b.ageMax > g('age_seuil_jours')) k.ageAlert++;
+      if (seen[b.rackId]) return;
+      seen[b.rackId] = true;
+      var r = rackById(b.rackId);
+      if (!r) return;
+      var gr = Object.assign({}, r);
+      gr.variants = DATA.blocks.filter(function (x) { return x.rackId === r.id; }).sort(function (a, c) { return a.order - c.order; });
+      out.push(gr);
     });
+    return out;
+  }
+  function groupName(gr) { return gr.label || (gr.prog + ' ' + gr.bloc); }
+  function groupIdOf(blockId) { var b = blockById(blockId); return b ? b.rackId : blockId; }
+
+  function kpisOf(blocks) {
+    var k = { blocks: blocks.length, aju: 0, cap: 0, avenir: 0, debord: 0, oldest: null, ageAlert: 0 };
+    var grs = groupsOf(blocks);
+    grs.forEach(function (gr) {
+      k.aju += gr.aju; k.cap += gr.cap; k.avenir += gr.avenir; k.debord += gr.excess;
+      gr.variants.forEach(function (b) {
+        if (b.aju > 0 && (!k.oldest || b.ageMax > k.oldest.age)) k.oldest = { age: b.ageMax, blockId: b.id, label: blockName(b) };
+      });
+    });
+    k.rows = grs.length;
+    k.rougeRows = grs.filter(function (gr) { return gr.status === 'ROUGE'; });
+    k.rouge = k.rougeRows.length;
+    k.plein = grs.filter(function (gr) { return gr.status === 'PLEIN'; }).length;
+    k.ageAlert = grs.filter(function (gr) { return gr.ageMax > g('age_seuil_jours'); }).length;
     k.fill = k.cap > 0 ? k.aju / k.cap : 0;
     return k;
   }
@@ -209,13 +236,35 @@
 
   function renderView() {
     ['buffer', 'debord', 'histo', 'params'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
-    $('#filters').hidden = S.view === 'params';
+    $('#filters').hidden = !S.filtersOpen || S.view === 'params';
+    $('#btn-filters').hidden = S.view === 'params';
+    $('#btn-filters').setAttribute('aria-expanded', String(!!S.filtersOpen && S.view !== 'params'));
     if (S.view === 'buffer') renderBuffer();
     else if (S.view === 'debord') renderDebord();
     else if (S.view === 'histo') renderHisto();
     else if (S.view === 'params') renderParams();
     $('#btn-mass').disabled = S.view !== 'buffer' || !filtered().length;
-    $('#btn-mass').textContent = '✎ Modifier la sélection (' + filtered().length + ')';
+    $('#btn-mass').textContent = '✎ Modifier mini / maxi des ' + filtered().length + ' blocs affichés';
+  }
+
+  /** Résumé des filtres actifs, affiché à côté du bouton « Filtres ». */
+  function filterSummary() {
+    var parts = [];
+    if (JSON.stringify(S.prog) !== JSON.stringify(DEFAULT_STATE.prog)) parts.push(S.prog.length ? S.prog.join(' + ') : 'tous programmes');
+    ['ver', 'cadre', 'avar', 'flux'].forEach(function (k) { if (S[k].length) parts.push(S[k].join(' + ')); });
+    if (S.cote.length) parts.push(S.cote.map(function (c) { return c === 'D' ? 'Droit' : 'Gauche'; }).join(' + '));
+    if (S.st.length) parts.push(S.st.map(function (s) { return STATUS[s].label; }).join(' + '));
+    if (S.q) parts.push('« ' + S.q + ' »');
+    return parts;
+  }
+  function renderFilterButton() {
+    if (TV) return;
+    var parts = filterSummary();
+    $('#filter-count').textContent = parts.length ? parts.length : '';
+    $('#filter-count').hidden = !parts.length;
+    $('#filter-summary').innerHTML = parts.length
+      ? esc(parts.join(' · ')) + ' <button type="button" class="linkish" data-act="reset-filters">effacer</button>'
+      : '<span class="muted">A320 + A321 · tous les blocs</span>';
   }
 
   function renderHeader() {
@@ -227,7 +276,6 @@
     sel.innerHTML = DATA.years.map(function (y) {
       return '<option value="' + esc(y.key) + '"' + (y.key === DATA.year ? ' selected' : '') + '>' + esc(y.label) + (y.key === g('annee_l1') ? ' (défaut)' : '') + '</option>';
     }).join('');
-    $('#sort').value = S.sort;
     $('#print-size').value = S.print || 'A4';
   }
 
@@ -236,30 +284,21 @@
     var um = DATA.unmapped || [];
     if (um.length) {
       var pcs = um.reduce(function (a, u) { return a + u.aju + u.avenir; }, 0);
-      html += '<div class="alert alert-unmapped" role="alert"><span>⚠ Réfs non rattachées : ' + um.length + ' réf' + (um.length > 1 ? 's' : '') +
-        ' (' + n(pcs) + ' pièce' + (pcs > 1 ? 's' : '') + ') présentes aux postes BUFFER / AJU mais absentes du mapping : ' +
-        um.map(function (u) { return esc(u.ref); }).join(', ') + '</span>' +
+      html += '<div class="alert alert-unmapped" role="alert"><span>⚠ ' + um.length + ' réf' + (um.length > 1 ? 's' : '') + ' non rattachée' + (um.length > 1 ? 's' : '') +
+        ' (' + n(pcs) + ' pièce' + (pcs > 1 ? 's' : '') + ' comptées nulle part)</span>' +
         (TV ? '' : '<button type="button" class="btn btn-small" data-act="unmapped">Rattacher à un bloc</button>') + '</div>';
     }
-    var w = DATA.warnings || [];
-    var errs = w.filter(function (x) { return x.level === 'error'; });
-    var other = w.filter(function (x) { return x.level !== 'error'; });
-    errs.forEach(function (x) { html += '<div class="alert alert-error" role="alert">✖ ' + esc(x.msg) + '</div>'; });
-    if (other.length) {
-      var warnN = other.filter(function (x) { return x.level === 'warn'; }).length;
-      html += '<div class="alert ' + (warnN ? 'alert-warn' : 'alert-info') + '"><details><summary>ⓘ ' + other.length + ' message' + (other.length > 1 ? 's' : '') +
-        ' de contrôle des données' + (warnN ? ' dont ' + warnN + ' avertissement' + (warnN > 1 ? 's' : '') : '') + '</summary><ul>' +
-        other.map(function (x) { return '<li>' + esc(x.msg) + '</li>'; }).join('') + '</ul></details></div>';
-    }
+    // Seules les erreurs bloquantes restent en bandeau ; les messages de contrôle sont dans l'onglet Réglages
+    (DATA.warnings || []).filter(function (x) { return x.level === 'error'; }).forEach(function (x) {
+      html += '<div class="alert alert-error" role="alert">✖ ' + esc(x.msg) + '</div>';
+    });
     $('#alerts').innerHTML = html;
   }
 
-  function byProg(blocks, fn) {
-    var progs = PROG_ORDER.filter(function (p) { return blocks.some(function (b) { return b.prog === p; }); });
-    if (progs.length < 2) return '';
-    return progs.map(function (p) { return p + ' <b>' + fn(kpisOf(blocks.filter(function (b) { return b.prog === p; }))) + '</b>'; }).join(' · ');
-  }
-
+  /**
+   * 5 indicateurs, lisibles de loin : ce qu'il faut appeler (ROUGE), la place (Débord),
+   * le niveau global, ce qui arrive (À venir), le FIFO (plus ancienne).
+   */
   function renderKpis() {
     var blocks = filtered();
     if (TV) blocks = DATA.blocks.filter(function (b) { return tvProgs().indexOf(b.prog) >= 0; });
@@ -268,25 +307,28 @@
     var debTotal = DATA.debord.total;
     var lvl = debordLevel(debTotal, cap);
     var html = '';
-    html += '<div class="kpi" title="Pièces AJU / Σ capacités des blocs affichés"><span class="kpi-label">Remplissage buffer AJU</span>' +
+
+    var names = k.rougeRows.map(groupName);
+    var rougeSub = !names.length ? 'aucun bloc à appeler' : esc(names.slice(0, 3).join(', ')) + (names.length > 3 ? ' +' + (names.length - 3) : '');
+    html += kpiBtn('k-rouge' + (S.st.length === 1 && S.st[0] === 'ROUGE' ? ' active' : ''), 'st:ROUGE', '▼ À appeler (ROUGE)', k.rouge, rougeSub);
+
+    html += kpiBtn('k-debord k-lvl-' + lvl.key, 'view:debord', 'Débord', n(debTotal) + '<small> / ' + n(cap) + '</small>',
+      '<div class="minibar"><span class="mb-' + lvl.key + '" style="width:' + Math.min(100, lvl.r) + '%"></span></div><span class="lvl lvl-' + lvl.key + '">' + lvl.label + '</span>');
+
+    html += '<div class="kpi" title="Pièces AJU / somme des capacités des blocs affichés"><span class="kpi-label">Remplissage AJU</span>' +
       '<span class="kpi-value">' + pct(k.fill) + '</span><div class="minibar"><span style="width:' + Math.min(100, k.fill * 100) + '%"></span></div>' +
-      '<span class="kpi-sub">' + n(k.aju) + ' / ' + n(k.cap) + ' pcs' + (byProg(blocks, function (x) { return pct(x.fill); }) ? '<br>' + byProg(blocks, function (x) { return pct(x.fill); }) : '') + '</span></div>';
-    html += kpiBtn('k-rouge' + (S.st.length === 1 && S.st[0] === 'ROUGE' ? ' active' : ''), 'st:ROUGE', 'Blocs ROUGE ▼', k.rouge,
-      (byProg(blocks, function (x) { return x.rouge; }) || 'sur ' + k.blocks + ' blocs') + (TV ? '' : '<br>Cliquer pour filtrer'));
-    html += kpiBtn('k-plein' + (S.st.length === 1 && S.st[0] === 'PLEIN' ? ' active' : ''), 'st:PLEIN', 'Blocs PLEIN ■', k.plein,
-      (byProg(blocks, function (x) { return x.plein; }) || 'on n\'appelle plus') + (k.debordBlocks ? '<br>+ ' + k.debordBlocks + ' bloc' + (k.debordBlocks > 1 ? 's' : '') + ' en DÉBORD' : ''));
-    html += kpiBtn('k-debord', 'view:debord', 'Débord', n(debTotal) + '<small> / ' + n(cap) + '</small>',
-      '<div class="minibar"><span style="width:' + Math.min(100, lvl.r) + '%;background:var(--' + (lvl.key === 'normal' ? 'green' : lvl.key === 'vigilance' ? 'orange' : 'red') + ')"></span></div>' +
-      '<span class="lvl lvl-' + lvl.key + '">' + lvl.label + '</span> ' + (k.debord !== debTotal ? 'sélection : <b>' + n(k.debord) + '</b>' : '') +
-      (byProg(blocks, function (x) { return n(x.debord); }) ? '<br>' + byProg(blocks, function (x) { return n(x.debord); }) : ''));
-    html += '<div class="kpi k-avenir"><span class="kpi-label">À venir (statut BUFFER)</span><span class="kpi-value">' + n(k.avenir) + '<small> pcs</small></span>' +
-      '<span class="kpi-sub">' + (byProg(blocks, function (x) { return n(x.avenir); }) || 'pièces classées buffer, pas encore en AJU') + '</span></div>';
-    html += kpiBtn('k-age', k.oldest ? 'open:' + k.oldest.blockId : '', 'Pièce la plus ancienne', k.oldest ? n(k.oldest.age) + '<small> j</small>' : '–',
-      k.oldest ? esc(k.oldest.label) + (k.ageAlert ? '<br><b>' + k.ageAlert + '</b> bloc' + (k.ageAlert > 1 ? 's' : '') + ' &gt; ' + g('age_seuil_jours') + ' j' : '') : 'aucune pièce en AJU');
+      '<span class="kpi-sub">' + n(k.aju) + ' / ' + n(k.cap) + ' pcs' + (k.plein ? ' · ' + k.plein + ' plein' + (k.plein > 1 ? 's' : '') : '') + '</span></div>';
+
+    html += '<div class="kpi k-avenir"><span class="kpi-label">À venir</span><span class="kpi-value">' + n(k.avenir) + '<small> pcs</small></span>' +
+      '<span class="kpi-sub">en entrée buffer, pas encore en AJU</span></div>';
+
+    html += kpiBtn('k-age' + (k.oldest && k.oldest.age > g('age_seuil_jours') ? ' k-age-alert' : ''), k.oldest ? 'open:' + k.oldest.blockId : '', 'Plus ancienne', k.oldest ? n(k.oldest.age) + '<small> j</small>' : '–',
+      k.oldest ? esc(k.oldest.label) : 'aucune pièce en AJU');
+
     var um = DATA.unmapped || [];
     if (um.length) {
       var pcs = um.reduce(function (a, u) { return a + u.aju + u.avenir; }, 0);
-      html += kpiBtn('k-unmapped', 'unmapped', 'Réfs non rattachées ⚠', um.length, n(pcs) + ' pièce' + (pcs > 1 ? 's' : '') + ' non comptées dans les blocs');
+      html += kpiBtn('k-unmapped', 'unmapped', '⚠ Non rattachées', um.length, n(pcs) + ' pièce' + (pcs > 1 ? 's' : '') + ' hors blocs');
     }
     $('#kpis').innerHTML = html;
   }
@@ -324,8 +366,13 @@
         }).join('') + '</div>';
     }).join('');
     html += '<div class="search"><input type="search" id="q" placeholder="Rechercher une réf, une désignation, un OF…" value="' + esc(S.q) + '" aria-label="Recherche libre">' +
+      '<label class="sort-select"><span>Tri</span><select id="sort" aria-label="Tri des blocs">' +
+      [['crit', 'Criticité'], ['bloc', 'Bloc'], ['fill-asc', 'Remplissage ↑'], ['fill-desc', 'Remplissage ↓']].map(function (o) {
+        return '<option value="' + o[0] + '"' + (S.sort === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+      }).join('') + '</select></label>' +
       '<button type="button" class="linkish" data-act="reset-filters">Réinitialiser</button></div>';
     $('#filters').innerHTML = html;
+    renderFilterButton();
   }
   function blockVal(b, key) { return { prog: b.prog, cadre: b.cadre, avar: b.avar, cote: b.cote, flux: b.flux, st: b.status }[key]; }
   function fluxRank(f) { var i = FLUX_ORDER.indexOf(normFlux(f)); return i < 0 ? 99 : i; }
@@ -339,6 +386,8 @@
     if (DATA.user) parts.push('Connecté : ' + esc(DATA.user));
     if (!TV && DATA.paramsUrl) parts.push('<a href="' + esc(DATA.paramsUrl) + '" target="_blank" rel="noopener">Classeur Paramètres</a>');
     parts.push(DATA.stats.piecesRows + ' lignes ZZ84 aux postes BUFFER / AJU');
+    var nw = (DATA.warnings || []).filter(function (x) { return x.level !== 'error'; }).length;
+    if (nw && !TV) parts.push('<button type="button" class="linkish" data-act="view:params">ⓘ ' + nw + ' message' + (nw > 1 ? 's' : '') + ' de contrôle des données</button>');
     $('#foot-left').innerHTML = parts.join(' · ');
     var f = [];
     FILTER_KEYS.forEach(function (k) { if (S[k].length) f.push(k + ' = ' + S[k].join('/')); });
@@ -349,12 +398,12 @@
   /* ------------------------------------------------------------------ */
   /* Vue Buffer                                                          */
   /* ------------------------------------------------------------------ */
-  function sortBlocks(list) {
+  function sortGroups(list) {
     var cmp;
     if (S.sort === 'bloc') {
       cmp = function (a, b) {
         return a.cadre.localeCompare(b.cadre) || (a.avar === b.avar ? 0 : a.avar === 'AV' ? -1 : 1) ||
-          a.version.localeCompare(b.version) || (a.cote === b.cote ? 0 : a.cote === 'D' ? -1 : 1);
+          (a.cote === b.cote ? 0 : a.cote === 'D' ? -1 : 1);
       };
     } else if (S.sort === 'fill-asc' || S.sort === 'fill-desc') {
       var sgn = S.sort === 'fill-asc' ? 1 : -1;
@@ -376,9 +425,9 @@
     var list = filtered();
     if (progOverride) list = DATA.blocks.filter(function (b) { return progOverride.indexOf(b.prog) >= 0 && matches(b, 'prog'); });
     if (!list.length) {
-      root.innerHTML = '<div class="empty"><b>Aucun bloc ne correspond aux filtres</b>Modifiez la sélection ou ' +
-        '<button type="button" class="linkish" data-act="reset-filters">réinitialisez les filtres</button>.' +
-        (S.prog.indexOf('A330') < 0 && !TV ? '<br>Les blocs A330 sont masqués par défaut : activez la puce « A330 ».' : '') + '</div>';
+      root.innerHTML = '<div class="empty"><b>Aucun bloc ne correspond aux filtres</b>' +
+        '<button type="button" class="linkish" data-act="reset-filters">Réinitialiser les filtres</button>' +
+        (S.prog.indexOf('A330') < 0 && !TV ? '<br>Les blocs A330 sont masqués par défaut (Filtres → A330).' : '') + '</div>';
       return;
     }
     var html = '';
@@ -386,14 +435,16 @@
       var pl = list.filter(function (b) { return b.prog === p; });
       if (!pl.length) return;
       var k = kpisOf(pl);
-      html += '<div class="band"><span>' + esc(p) + '</span><span class="band-sub">' + pl.length + ' blocs · AJU ' + n(k.aju) + ' / ' + n(k.cap) +
-        ' pcs (' + pct(k.fill) + ') · ' + k.rouge + ' rouge' + (k.rouge > 1 ? 's' : '') + ' · débord +' + n(k.debord) + ' · à venir ' + n(k.avenir) + '</span></div>';
-      html += '<div class="col-heads" aria-hidden="true"><span>À venir</span><span>Bloc</span><span>Niveau AJU · une case = une pièce</span><span>Débord</span><span>Âge max</span></div>';
-      var fluxes = uniq(pl.map(function (b) { return b.flux; })).sort(function (a, b) { return fluxRank(a) - fluxRank(b); });
+      var grs = groupsOf(pl);
+      html += '<div class="band"><span>' + esc(p) + '</span><span class="band-sub">AJU <b>' + n(k.aju) + '</b> / ' + n(k.cap) + ' pcs · ' +
+        (k.rouge ? '<b>' + k.rouge + '</b> à appeler' : 'aucun rouge') + (k.debord ? ' · débord <b>+' + n(k.debord) + '</b>' : '') + '</span></div>';
+      html += '<div class="col-heads" aria-hidden="true"><span>À venir</span><span>Bloc</span>' +
+        '<span>Niveau · une case = une pièce <i class="lg lg-min"></i>mini <i class="lg lg-max"></i>maxi <i class="lg lg-proj"></i>à venir</span>' +
+        '<span>AJU</span><span>Débord</span><span>Âge</span></div>';
+      var fluxes = uniq(grs.map(function (gr) { return gr.flux; })).sort(function (a, b) { return fluxRank(a) - fluxRank(b); });
       fluxes.forEach(function (f) {
-        var fl = sortBlocks(pl.filter(function (b) { return b.flux === f; }));
         html += '<div class="flux-head">' + esc(f) + ' <span>' + esc(FLUX_SUB[normFlux(f)] || '') + '</span></div>';
-        fl.forEach(function (b) { html += rowHtml(b); });
+        sortGroups(grs.filter(function (gr) { return gr.flux === f; })).forEach(function (gr) { html += rowHtml(gr); });
       });
     });
     root.innerHTML = html;
@@ -401,75 +452,90 @@
 
   function cssId(id) { return String(id).replace(/[^A-Za-z0-9_-]/g, '_'); }
 
-  function rowHtml(b) {
-    var st = STATUS[b.status];
-    var open = !!OPEN[b.id] && !TV;
-    var ageAlert = b.aju > 0 && b.ageMax > g('age_seuil_jours');
-    var aValider = b.refs.some(function (r) { return r.aValider; });
-    var empl = function (pcs) { return n(pcs / b.ppe) + ' empl.'; };
-    var tip = blockName(b) + ' · ' + st.label + '\nAJU ' + n(b.aju) + ' pcs (' + empl(b.aju) + ') · à venir ' + n(b.avenir) + ' · projection ' + n(b.projection) +
-      '\nMini ' + b.mini + ' · Maxi ' + b.maxi + ' · Capacité ' + b.cap + ' pcs (' + empl(b.cap) + ', ' + b.ppe + ' pc/empl.)';
-    var h = '<div class="row st-' + b.status + '" id="row-' + cssId(b.id) + '" data-id="' + esc(b.id) + '" role="button" tabindex="0" aria-expanded="' + open + '" aria-controls="det-' + cssId(b.id) + '" title="' + esc(tip) + '">';
-    h += '<span class="fam fam-' + famKey(b) + '" aria-hidden="true"></span>';
-    h += '<div class="c-av"><span class="avenir' + (b.avenir ? '' : ' zero') + '" aria-label="' + n(b.avenir) + ' pièces à venir"><b>' + n(b.avenir) + '</b><small>à venir</small></span></div>';
-    h += '<div class="c-name"><div class="bname">' + esc(b.bloc) + '</div><div class="meta"><span class="ver">' + esc(b.version) + '</span>' +
-      '<span class="flux-chip">' + esc(b.flux) + '</span><span class="st-pill ' + b.status + '" title="' + esc(st.title) + '">' + st.icon + ' ' + st.label + '</span>' +
-      (aValider ? '<span class="warn-pill" title="Rattachement de réf à valider">à valider</span>' : '') +
-      (b.l1Missing ? '<span class="warn-pill" title="Réf L1 absente de l\'onglet L1">L1 ?</span>' : '') +
-      '<span class="spark-inline spark-slot no-tv" data-id="' + esc(b.id) + '">' + (HISTO ? sparkSvg(b.id, 60, 16) : '') + '</span></div></div>';
-    h += '<div class="c-gauge">' + gaugeHtml(b) + '</div>';
-    h += '<div class="c-deb">' + (b.excess > 0 ? '<span class="deb" aria-label="' + b.excess + ' pièces en débord"><b>+' + n(b.excess) + '</b><small>débord</small></span>' : '<span class="deb-none" aria-label="pas de débord">–</span>') +
-      (b.projExcess > b.excess ? '<span class="deb-proj">prévu +' + n(b.projExcess) + '</span>' : '') + '</div>';
-    h += '<div class="c-age">' + (b.aju > 0 ? (ageAlert ? '<span class="age-badge" title="Pièce au poste depuis plus de ' + g('age_seuil_jours') + ' j">⏱ ' + n(b.ageMax) + ' j</span>' : n(b.ageMax) + ' j') + '<small>âge max</small>' : '<span class="deb-none">–</span>') + '</div>';
+  function statusPills(statuses) {
+    return statuses.map(function (s) { return '<span class="st-pill ' + s + '" title="' + esc(STATUS[s].title) + '">' + STATUS[s].icon + ' ' + STATUS[s].label + '</span>'; }).join('');
+  }
+
+  function rowHtml(gr) {
+    var open = !!OPEN[gr.id] && !TV;
+    var shared = gr.variants.length > 1;
+    var ageAlert = gr.ageMax > g('age_seuil_jours');
+    var st = STATUS[gr.status];
+    var tip = groupName(gr) + ' : ' + st.label + ' · AJU ' + n(gr.aju) + ' / ' + gr.cap + ' (mini ' + gr.mini + ', maxi ' + gr.maxi + ') · à venir ' + n(gr.avenir) +
+      (shared ? '\nRack partagé : ' + gr.variants.map(function (b) { return b.version + ' ' + n(b.aju) + ' pcs (capacité ' + b.cap + ')'; }).join(' + ') : '');
+    var h = '<div class="row st-' + gr.status + '" id="row-' + cssId(gr.id) + '" data-id="' + esc(gr.id) + '" role="button" tabindex="0" aria-expanded="' + open + '" title="' + esc(tip) + '">';
+    h += '<span class="fam fam-' + gr.prog + '-' + gr.cadre + '" aria-hidden="true"></span>';
+    h += '<div class="c-av"><span class="avenir' + (gr.avenir ? '' : ' zero') + '" aria-label="' + n(gr.avenir) + ' pièces à venir"><b>' + n(gr.avenir) + '</b><small>à venir</small></span></div>';
+    h += '<div class="c-name"><div class="bname">' + esc(gr.bloc) + '</div><div class="meta">' + statusPills([gr.status]) +
+      '<span class="ver">' + esc(gr.variants.map(function (b) { return b.version; }).join(' + ')) + '</span></div></div>';
+    h += '<div class="c-gauge' + (shared ? ' multi' : '') + '">' + rackGauge(gr, shared) + '</div>';
+    h += '<div class="c-lvl"><b>' + n(gr.aju) + '</b><small>/ ' + gr.cap + '</small></div>';
+    h += '<div class="c-deb">' + (gr.excess > 0 ? '<span class="deb" aria-label="' + gr.excess + ' pièces en débord"><b>+' + n(gr.excess) + '</b></span>' : '<span class="deb-none" aria-label="pas de débord">–</span>') + '</div>';
+    h += '<div class="c-age">' + (gr.aju > 0 ? (ageAlert ? '<span class="age-badge" title="Pièce au poste depuis plus de ' + g('age_seuil_jours') + ' j">' + n(gr.ageMax) + ' j</span>' : n(gr.ageMax) + ' j') : '<span class="deb-none">–</span>') + '</div>';
     h += '<span class="chev no-tv" aria-hidden="true">▶</span></div>';
-    if (open) h += detailHtml(b);
+    if (open) h += detailHtml(gr);
     return h;
   }
 
-  function gaugeHtml(b) {
-    var cap = b.cap;
-    var label = 'AJU ' + n(b.aju) + ' sur capacité ' + cap + ', mini ' + b.mini + ', maxi ' + b.maxi + ', à venir ' + n(b.avenir);
+  /** Une seule piste pour le rack (place partagée), une case par pièce ; la répartition par variante est indiquée au-dessus. */
+  function rackGauge(gr, shared) {
+    var cap = gr.cap;
+    var label = groupName(gr) + ' : AJU ' + n(gr.aju) + ' sur capacité ' + cap + ', mini ' + gr.mini + ', maxi ' + gr.maxi + ', à venir ' + n(gr.avenir);
+    var head = shared ? '<span class="seg-label">rack partagé · ' + gr.variants.map(function (b) { return esc(b.version) + ' <b>' + n(b.aju) + '</b>'; }).join(' + ') + '</span>' : '';
     if (cap <= 0) {
-      return '<div class="gauge-zero" role="img" aria-label="' + esc(label) + '">Capacité 0' + (b.aju ? ' : tout part au débord' : '') + '</div>' + legendHtml(b);
+      return '<div class="seg st-' + gr.status + '">' + head + '<div class="gauge-zero" role="img" aria-label="' + esc(label) + '">capacité 0</div></div>';
     }
     var cells = '';
-    var aju = Math.min(Math.round(b.aju), cap), proj = Math.min(Math.round(b.projection), cap);
+    var aju = Math.min(Math.round(gr.aju), cap), proj = Math.min(Math.round(gr.projection), cap);
     for (var i = 0; i < cap; i++) cells += '<span class="cell' + (i < aju ? ' on' : (i < proj ? ' proj' : '')) + '"></span>';
     var marks = '';
-    if (b.mini > 0) marks += '<span class="mark mini" style="left:calc(' + (b.mini / cap * 100) + '% - ' + (b.mini / cap * 3) + 'px)"><span>min ' + b.mini + '</span></span>';
-    if (b.maxi > 0) marks += '<span class="mark maxi' + (b.maxi >= cap ? ' at-end' : '') + '" style="left:calc(' + (b.maxi / cap * 100) + '% - ' + (b.maxi / cap * 3) + 'px)"><span>max ' + b.maxi + '</span></span>';
-    return '<div class="gauge" style="--cap:' + cap + '" role="img" aria-label="' + esc(label) + '">' + cells + marks + '</div>' + legendHtml(b);
+    if (gr.mini > 0) marks += '<span class="mark mini" style="left:calc(' + (gr.mini / cap * 100) + '% - ' + (gr.mini / cap * 3) + 'px)"></span>';
+    if (gr.maxi > 0 && gr.maxi < cap) marks += '<span class="mark maxi" style="left:calc(' + (gr.maxi / cap * 100) + '% - ' + (gr.maxi / cap * 3) + 'px)"></span>';
+    return '<div class="seg st-' + gr.status + (gr.maxi >= cap ? ' max-at-end' : '') + '">' + head +
+      '<div class="gauge" style="--cap:' + cap + '" role="img" aria-label="' + esc(label) + '">' + cells + marks + '</div></div>';
   }
 
-  function legendHtml(b) {
-    var parts = ['<span><b>' + n(b.aju) + '</b> / ' + b.cap + ' pcs</span>'];
-    if (b.ppe > 1) parts.push('<span>' + n(b.aju / b.ppe) + ' / ' + n(b.cap / b.ppe) + ' empl.</span>');
-    if (b.avenir > 0) {
-      var ps = STATUS[b.projStatus];
-      parts.push('<span class="proj-hint">→ ' + n(b.projection) + ' avec l\'à venir' + (b.projStatus !== b.status ? ' : ' + ps.icon + ' ' + ps.label : '') + '</span>');
+  function detailHtml(gr) {
+    var shared = gr.variants.length > 1;
+    var h = '<div class="detail" id="det-' + cssId(gr.id) + '">';
+    if (shared) {
+      var sum = function (f) { return gr.variants.map(function (b) { return b[f]; }).join(' + '); };
+      h += '<div class="rack-sum"><b>Rack partagé ' + esc(gr.variants.map(function (b) { return b.version; }).join(' + ')) + '</b>' +
+        '<span>capacité <b>' + gr.cap + '</b> = ' + sum('cap') + '</span><span>mini <b>' + gr.mini + '</b> = ' + sum('mini') + '</span>' +
+        '<span>maxi <b>' + gr.maxi + '</b> = ' + sum('maxi') + '</span>' +
+        '<span class="muted">Les réglages de chaque variante s\'additionnent pour former ceux du rack.</span></div>';
     }
-    return '<div class="gauge-legend">' + parts.join('') + '</div>';
+    gr.variants.forEach(function (b) {
+      h += '<section class="variant">';
+      h += '<div class="variant-head"><b>' + esc(blockName(b)) + '</b>' + (shared ? '' : statusPills([b.status])) +
+        '<span>AJU <b>' + n(b.aju) + '</b>' + (shared ? ' · part de capacité ' : ' / ') + b.cap + ' · mini ' + b.mini + ' · maxi ' + b.maxi + '</span>' +
+        '<span>à venir <b>' + n(b.avenir) + '</b></span>' +
+        '<span class="muted">' + esc(b.flux) + (b.ppe > 1 ? ' · ' + b.ppe + ' pcs / emplacement' : '') + '</span></div>';
+      h += '<div class="variant-body">' + refsHtml(b) + ofsHtml(b) + (TV ? '' : settingsHtml(b)) + '</div>';
+      h += '</section>';
+    });
+    return h + '</div>';
   }
 
-  function detailHtml(b) {
-    var h = '<div class="detail" id="det-' + cssId(b.id) + '">';
-    h += '<div><h3>Détail par réf</h3><div class="scroll" style="max-height:none"><table class="tbl"><thead><tr><th>Réf</th><th>Type</th><th>Désignation</th><th class="num">AJU</th><th class="num">À venir</th></tr></thead><tbody>' +
+  function refsHtml(b) {
+    return '<div><h3>Réfs du bloc</h3><div class="scroll" style="max-height:none"><table class="tbl"><thead><tr><th>Réf</th><th>Type</th><th>Désignation</th><th class="num">AJU</th><th class="num">À venir</th></tr></thead><tbody>' +
       b.refs.map(function (r) {
         return '<tr><td class="mono">' + esc(r.ref) + '</td><td><span class="type-tag ' + esc(r.type) + '">' + esc(r.type) + '</span>' +
           (r.versionRef ? ' <span class="type-tag">' + esc(r.versionRef) + '</span>' : '') +
           (r.aValider ? ' <span class="warn-pill" title="' + esc(r.comment || 'Rattachement à valider') + '">à valider</span>' : '') + '</td>' +
           '<td>' + esc(r.designation || '–') + '</td><td class="num">' + n(r.aju) + '</td><td class="num">' + n(r.avenir) + '</td></tr>';
       }).join('') + '</tbody></table></div>' +
-      '<div class="spark-box"><h3>Évolution AJU (photos)</h3><div id="spark-' + cssId(b.id) + '">' + sparkDetail(b.id) + '</div></div></div>';
-    h += '<div><h3>Ordres de fabrication (' + b.ofs.length + ')</h3>' + (b.ofs.length ? '<div class="scroll"><table class="tbl"><thead><tr><th>N° OF</th><th>Réf</th><th class="num">Qté</th><th class="num">Âge</th><th>Opér.</th><th>N° série</th><th>Statut</th></tr></thead><tbody>' +
+      '<div class="spark-box"><h3>Évolution AJU</h3><div id="spark-' + cssId(b.id) + '">' + sparkDetail(b.id) + '</div></div></div>';
+  }
+
+  function ofsHtml(b) {
+    return '<div><h3>Ordres de fabrication (' + b.ofs.length + ')</h3>' + (b.ofs.length ? '<div class="scroll"><table class="tbl"><thead><tr><th>N° OF</th><th>Réf</th><th class="num">Qté</th><th class="num">Âge</th><th>Opér.</th><th>N° série</th><th>Statut</th></tr></thead><tbody>' +
       b.ofs.map(function (o) {
         var old = o.statut === 'AJU' && o.age > g('age_seuil_jours');
         return '<tr><td class="mono">' + esc(o.of) + '</td><td class="mono">' + esc(o.ref) + '</td><td class="num">' + n(o.qte) + '</td>' +
           '<td class="num">' + (old ? '<span class="age-badge">' + n(o.age) + ' j</span>' : n(o.age) + ' j') + '</td><td>' + esc(o.oper) + '</td><td>' + esc(o.serie) + '</td>' +
           '<td>' + (o.statut === 'AJU' ? '<span class="tag-aju">AJU</span>' : '<span class="tag-avenir">À venir</span>') + ' <small>' + esc(o.poste) + '</small></td></tr>';
       }).join('') + '</tbody></table></div>' : '<p class="deb-none">Aucun OF aux postes BUFFER / AJU.</p>') + '</div>';
-    if (!TV) h += settingsHtml(b);
-    return h + '</div>';
   }
 
   /* --- Réglages d'un bloc (stepper + validation) --- */
@@ -611,12 +677,13 @@
     }
     html += '<div class="deb-grid">' + cells + '</div>';
     html += '<div class="fam-legend">' + Object.keys(FAM_COLORS).map(function (k) { return '<span><i style="background:' + FAM_COLORS[k] + '"></i>' + k.replace('-', ' ') + '</span>'; }).join('') + '</div>';
-    var over = DATA.blocks.filter(function (b) { return b.excess > 0; }).sort(function (a, b) { return b.excess - a.excess; });
+    var over = (DATA.racks || []).filter(function (r) { return r.excess > 0; }).sort(function (a, b) { return b.excess - a.excess; });
     if (over.length) {
       html += '<h3 class="flux-head">Blocs en débord</h3><table class="tbl"><thead><tr><th>Bloc</th><th class="num">AJU</th><th class="num">Capacité</th><th class="num">Excédent</th><th class="num">Âge max</th><th>Lecture</th></tr></thead><tbody>' +
-        over.map(function (b) {
-          return '<tr' + (vis[b.id] ? '' : ' style="opacity:.5"') + '><td><b>' + esc(blockName(b)) + '</b></td><td class="num">' + n(b.aju) + '</td><td class="num">' + b.cap + '</td><td class="num"><b>+' + n(b.excess) + '</b></td><td class="num">' + n(b.ageMax) + ' j</td>' +
-            '<td>' + (b.cap <= 2 ? 'Capacité L1 faible (' + b.cap + ') : vérifier le dimensionnement ou l\'unité' : 'Ne plus appeler ce bloc') + '</td></tr>';
+        over.map(function (r) {
+          var visible = r.blockIds.some(function (id) { return vis[id]; });
+          return '<tr' + (visible ? '' : ' style="opacity:.5"') + '><td><b>' + esc(r.label) + '</b> <span class="muted">' + esc(r.versions.join(' + ')) + '</span></td><td class="num">' + n(r.aju) + '</td><td class="num">' + r.cap + '</td><td class="num"><b>+' + n(r.excess) + '</b></td><td class="num">' + n(r.ageMax) + ' j</td>' +
+            '<td>' + (r.cap <= 2 ? 'Capacité L1 faible (' + r.cap + ') : vérifier le dimensionnement ou l\'unité' : 'Ne plus appeler ce bloc') + '</td></tr>';
         }).join('') + '</tbody></table>';
     }
     root.innerHTML = html;
@@ -722,7 +789,10 @@
   function renderParams() {
     var root = $('#view-params');
     var meta = DATA.globalsMeta || {};
-    var html = '<div class="params-grid"><div class="pcard"><h3>Paramètres globaux (partagés)</h3>' + GLOBAL_FIELDS.map(function (f) {
+    var warns = (DATA.warnings || []).filter(function (x) { return x.level !== 'error'; });
+    var html = warns.length ? '<div class="pcard" style="margin-bottom:1rem"><h3>Contrôle des données (' + warns.length + ')</h3><ul class="warn-list">' +
+      warns.map(function (x) { return '<li class="wl-' + x.level + '">' + esc(x.msg) + '</li>'; }).join('') + '</ul></div>' : '';
+    html += '<div class="params-grid"><div class="pcard"><h3>Paramètres globaux (partagés)</h3>' + GLOBAL_FIELDS.map(function (f) {
       var v = g(f.k), input;
       if (f.type === 'year') input = '<select data-g="' + f.k + '">' + DATA.years.map(function (y) { return '<option value="' + esc(y.key) + '"' + (y.key === v ? ' selected' : '') + '>' + esc(y.label) + '</option>'; }).join('') + '</select>';
       else if (f.type === 'unit') input = '<select data-g="' + f.k + '"><option value="pieces"' + (v === 'pieces' ? ' selected' : '') + '>Pièces</option><option value="emplacements"' + (v === 'emplacements' ? ' selected' : '') + '>Emplacements</option></select>';
@@ -857,12 +927,19 @@
     if (TV) return;
     if (OPEN[id]) delete OPEN[id]; else OPEN[id] = true;
     var row = $('#row-' + cssId(id));
-    var b = blockById(id);
-    if (!row || !b) return renderBuffer();
+    var gr = groupsOf(filtered()).filter(function (x) { return x.id === id; })[0];
+    if (!row || !gr) return renderBuffer();
     var det = $('#det-' + cssId(id));
     if (det) det.parentNode.removeChild(det);
     row.setAttribute('aria-expanded', String(!!OPEN[id]));
-    if (OPEN[id]) row.insertAdjacentHTML('afterend', detailHtml(b));
+    if (OPEN[id]) row.insertAdjacentHTML('afterend', detailHtml(gr));
+  }
+
+  function toggleFilters() {
+    S.filtersOpen = !S.filtersOpen;
+    renderView();
+    saveState();
+    if (S.filtersOpen) { var q = $('#q'); if (q) q.focus(); }
   }
 
   function setFilter(key, val) {
@@ -902,8 +979,9 @@
         var oid = act.slice(5), ob = blockById(oid);
         S.view = 'buffer';
         if (ob && !matches(ob)) { S.st = []; S.q = ''; if (S.prog.length && S.prog.indexOf(ob.prog) < 0) S.prog.push(ob.prog); }
-        OPEN[oid] = true; renderTabs(); renderAfterFilter();
-        var r = $('#row-' + cssId(oid)); if (r) r.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        var gid = groupIdOf(oid);
+        OPEN[gid] = true; renderTabs(); renderAfterFilter();
+        var r = $('#row-' + cssId(gid)); if (r) r.scrollIntoView({ behavior: 'smooth', block: 'center' });
         return;
       }
       switch (act) {
@@ -977,7 +1055,7 @@
         clearTimeout(t._deb);
         t._deb = setTimeout(function () {
           S.q = t.value.trim();
-          renderKpis(); renderView(); renderFooter(); saveState();
+          renderKpis(); renderView(); renderFooter(); renderFilterButton(); saveState();
           // met à jour les compteurs des puces sans perdre le focus de la recherche
           $all('.chip').forEach(function (c) {
             var key = c.getAttribute('data-f'), o = c.getAttribute('data-v');
@@ -1017,9 +1095,16 @@
     });
 
     $('#btn-refresh').onclick = function () { load(true); };
-    $('#btn-mass').onclick = openMass;
-    $('#btn-print').onclick = function () { setPrintSize(); window.print(); };
+    $('#btn-mass').onclick = function () { closeMenu(); openMass(); };
+    $('#btn-filters').onclick = toggleFilters;
+    $('#btn-print').onclick = function () { closeMenu(); setPrintSize(); window.print(); };
+    document.addEventListener('click', function (e) {
+      var m = $('#more-menu');
+      if (m && m.open && !m.contains(e.target)) m.open = false;
+    }, true);
   }
+
+  function closeMenu() { var m = $('#more-menu'); if (m) m.open = false; }
 
   function setPrintSize() {
     var st = $('#page-size');

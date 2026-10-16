@@ -98,7 +98,7 @@ function computeDashboard_(yearKey) {
     }
     var blk = {
       id: b.id, prog: b.prog, version: b.version, bloc: b.bloc, cadre: b.cadre, avar: b.avar, cote: b.cote,
-      flux: b.flux, order: b.order, refL1: b.refL1, l1Designation: l1row ? l1row.designation : '',
+      flux: b.flux, order: b.order, rackId: b.rack, refL1: b.refL1, l1Designation: l1row ? l1row.designation : '',
       l1Missing: !l1row, unit: lim.unit, ppe: lim.ppe, l1Value: lim.l1Value,
       cap: lim.cap, mini: lim.mini, maxi: lim.maxi,
       capDefault: lim.capDefault, miniDefault: lim.miniDefault, maxiDefault: lim.maxiDefault,
@@ -140,40 +140,39 @@ function computeDashboard_(yearKey) {
     blk.ofs.push({ of: p.ordre, ref: p.ref, qte: p.qte, age: p.age, oper: p.oper, serie: p.serie, statut: p.statut, poste: p.poste });
   });
 
-  /* --- Statuts, débord --- */
-  var debordPieces = [];
+  /* --- Variantes : niveau propre (information) --- */
   blocks.forEach(function (blk) {
     blk.refs.sort(function (a, b) { return (b.isL1 - a.isL1) || a.ref.localeCompare(b.ref); });
     blk.ofs.sort(function (a, b) { return (a.statut === b.statut ? 0 : a.statut === 'AJU' ? -1 : 1) || b.age - a.age; });
     blk.projection = blk.aju + blk.avenir;
-    blk.status = blockStatus_(blk.aju, blk.mini, blk.maxi, blk.cap);
-    blk.projStatus = blockStatus_(blk.projection, blk.mini, blk.maxi, blk.cap);
-    blk.excess = Math.max(0, blk.aju - blk.cap);
-    blk.projExcess = Math.max(0, blk.projection - blk.cap);
-    blk.fill = blk.cap > 0 ? blk.aju / blk.cap : (blk.aju > 0 ? Infinity : 0);
-    if (blk.excess > 0) {
-      // Les pièces arrivées en dernier (âge le plus faible) sont celles qui n'ont plus de place sur le rack
-      var units = [];
-      blk.ofs.forEach(function (o) {
-        if (o.statut !== 'AJU') return;
-        for (var i = 0; i < Math.max(1, Math.round(o.qte)); i++) units.push({ of: o.of, ref: o.ref, age: o.age, serie: o.serie });
-      });
-      units.sort(function (a, b) { return a.age - b.age; });
-      blk.overflow = units.slice(0, blk.excess);
-      blk.overflow.forEach(function (u) {
-        debordPieces.push({ blockId: blk.id, prog: blk.prog, cadre: blk.cadre, label: blockLabel_(blk), of: u.of, ref: u.ref, age: u.age, serie: u.serie });
-      });
-    }
-    if (!isFinite(blk.fill)) blk.fill = 99;
+    blk.ownStatus = blockStatus_(blk.aju, blk.mini, blk.maxi, blk.cap);
+  });
+
+  /* --- Racks : les variantes d'un même bloc physique (ex. A321 ACF + XLR) partagent la place --- */
+  var racks = buildRacks_(blocks);
+  var debordPieces = [];
+  racks.forEach(function (rk) {
+    rk.overflow.forEach(function (u) { debordPieces.push(u); });
+    // Le statut du rack s'applique à chacune de ses variantes (filtres, KPI)
+    rk.blocks.forEach(function (blk) {
+      blk.status = rk.status;
+      blk.projStatus = rk.projStatus;
+    });
   });
   debordPieces.sort(function (a, b) { return b.age - a.age; }); // FIFO : la plus ancienne d'abord
+  var racksOut = racks.map(function (rk) {
+    var o = {};
+    Object.keys(rk).forEach(function (k) { if (k !== 'blocks') o[k] = rk[k]; });
+    return o;
+  });
 
   var unmappedList = Object.keys(unmapped).map(function (k) { return unmapped[k]; })
     .sort(function (a, b) { return (b.aju + b.avenir) - (a.aju + a.avenir); });
 
   var kpis = {};
   ['ALL', 'A320', 'A321', 'A330'].forEach(function (scope) {
-    kpis[scope] = computeKpis_(blocks.filter(function (b) { return scope === 'ALL' || b.prog === scope; }), g);
+    var inScope = function (x) { return scope === 'ALL' || x.prog === scope; };
+    kpis[scope] = computeKpis_(racks.filter(inScope), blocks.filter(inScope), g);
   });
 
   return {
@@ -186,6 +185,7 @@ function computeDashboard_(yearKey) {
     globals: g,
     globalsMeta: params.globals.meta,
     blocks: blocks,
+    racks: racksOut,
     debord: { pieces: debordPieces, capacity: g.debord_capacite, total: debordPieces.length },
     unmapped: unmappedList,
     kpis: kpis,
@@ -206,17 +206,68 @@ function blockLabel_(b) {
   return b.prog + ' ' + b.version + ' ' + b.bloc;
 }
 
-function computeKpis_(blocks, g) {
-  var k = { blocks: blocks.length, aju: 0, cap: 0, avenir: 0, rouge: 0, vert: 0, plein: 0, debordBlocks: 0, debord: 0,
+/**
+ * Regroupe les variantes par rack (colonne « Rack » de Parametres_Blocs, défaut : programme + bloc).
+ * Capacité, mini et maxi du rack = somme des variantes ; statut et débord calculés sur le rack.
+ * Le débord = les pièces AJU les plus récentes du rack (celles qui n'ont plus trouvé de place).
+ */
+function buildRacks_(blocks) {
+  var byId = {}, racks = [];
+  blocks.forEach(function (blk) {
+    var rk = byId[blk.rackId];
+    if (!rk) {
+      rk = byId[blk.rackId] = { id: blk.rackId, prog: blk.prog, bloc: blk.bloc, cadre: blk.cadre, avar: blk.avar, cote: blk.cote,
+        flux: blk.flux, order: blk.order, blockIds: [], versions: [], blocks: [],
+        aju: 0, avenir: 0, cap: 0, mini: 0, maxi: 0, ageMax: 0 };
+      racks.push(rk);
+    }
+    rk.blocks.push(blk);
+    rk.blockIds.push(blk.id);
+    rk.versions.push(blk.version);
+    rk.order = Math.min(rk.order, blk.order);
+    ['aju', 'avenir', 'cap', 'mini', 'maxi'].forEach(function (f) { rk[f] += blk[f]; });
+    if (blk.aju > 0) rk.ageMax = Math.max(rk.ageMax, blk.ageMax);
+  });
+  racks.forEach(function (rk) {
+    rk.label = rk.prog + ' ' + rk.bloc;
+    rk.shared = rk.blocks.length > 1;
+    rk.projection = rk.aju + rk.avenir;
+    rk.status = blockStatus_(rk.aju, rk.mini, rk.maxi, rk.cap);
+    rk.projStatus = blockStatus_(rk.projection, rk.mini, rk.maxi, rk.cap);
+    rk.excess = Math.max(0, rk.aju - rk.cap);
+    rk.projExcess = Math.max(0, rk.projection - rk.cap);
+    rk.fill = rk.cap > 0 ? rk.aju / rk.cap : (rk.aju > 0 ? 99 : 0);
+    rk.overflow = [];
+    if (rk.excess > 0) {
+      var units = [];
+      rk.blocks.forEach(function (blk) {
+        blk.ofs.forEach(function (o) {
+          if (o.statut !== 'AJU') return;
+          for (var i = 0; i < Math.max(1, Math.round(o.qte)); i++) {
+            units.push({ blockId: blk.id, rackId: rk.id, prog: blk.prog, cadre: blk.cadre, label: blockLabel_(blk), of: o.of, ref: o.ref, age: o.age, serie: o.serie });
+          }
+        });
+      });
+      units.sort(function (a, b) { return a.age - b.age; });
+      rk.overflow = units.slice(0, rk.excess);
+    }
+  });
+  return racks;
+}
+
+function computeKpis_(racks, blocks, g) {
+  var k = { racks: racks.length, aju: 0, cap: 0, avenir: 0, rouge: 0, vert: 0, plein: 0, debordRacks: 0, debord: 0,
     oldest: null, ageAlert: 0 };
+  racks.forEach(function (r) {
+    k.aju += r.aju; k.cap += r.cap; k.avenir += r.avenir; k.debord += r.excess;
+    if (r.status === 'ROUGE') k.rouge++;
+    else if (r.status === 'VERT') k.vert++;
+    else if (r.status === 'PLEIN') k.plein++;
+    else k.debordRacks++;
+    if (r.ageMax > toNum_(g.age_seuil_jours)) k.ageAlert++;
+  });
   blocks.forEach(function (b) {
-    k.aju += b.aju; k.cap += b.cap; k.avenir += b.avenir; k.debord += b.excess;
-    if (b.status === 'ROUGE') k.rouge++;
-    else if (b.status === 'VERT') k.vert++;
-    else if (b.status === 'PLEIN') k.plein++;
-    else k.debordBlocks++;
     if (b.aju > 0 && (!k.oldest || b.ageMax > k.oldest.age)) k.oldest = { age: b.ageMax, blockId: b.id, label: blockLabel_(b) };
-    if (b.ageMax > toNum_(g.age_seuil_jours)) k.ageAlert++;
   });
   k.fill = k.cap > 0 ? k.aju / k.cap : 0;
   return k;

@@ -62,6 +62,7 @@ function readBlocks_(ss) {
       miniOverride: toNumOrNull_(r[col['Mini']]),
       maxiOverride: toNumOrNull_(r[col['Maxi']]),
       actif: str_(r[col['Actif']]).toUpperCase() !== 'NON',
+      rack: str_(r[col['Rack']]).toUpperCase() || makeRackId_(str_(r[col['Programme']]).toUpperCase(), bloc),
       order: toNum_(r[col['Ordre']]) || i
     });
   }

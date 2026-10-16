@@ -37,6 +37,8 @@ window.onerror = function (m, s, l) { document.body.insertAdjacentHTML('afterbeg
 window.addEventListener('load', function () { setTimeout(function () {
   if (location.hash === '#open') { var r = document.querySelectorAll('.row')[1]; r && r.click(); }
   if (location.hash === '#mass') document.querySelector('#btn-mass').click();
+  if (location.hash === '#filters') document.querySelector('#btn-filters').click();
+  if (location.hash === '#open321') { var r2 = document.querySelector('#row-A321-C42AVG'); r2 && r2.click(); }
   if (location.hash === '#overflow') {
     var W = document.documentElement.clientWidth, out = ['clientWidth=' + W + ' scrollWidth=' + document.documentElement.scrollWidth];
     Array.prototype.forEach.call(document.querySelectorAll('body *'), function (el) {

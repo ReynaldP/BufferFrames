@@ -46,27 +46,27 @@
       <button type="button" role="tab" data-view="params" class="tab">Réglages</button>
     </div>
     <div class="tool-right">
-      <label class="sort-select">
-        <span>Tri</span>
-        <select id="sort" aria-label="Tri des blocs">
-          <option value="crit">Criticité</option>
-          <option value="bloc">Bloc</option>
-          <option value="fill-asc">Remplissage ↑</option>
-          <option value="fill-desc">Remplissage ↓</option>
-        </select>
-      </label>
-      <button type="button" id="btn-mass" class="btn btn-ghost" title="Modifier mini / maxi / capacité de tous les blocs filtrés">✎ Modifier la sélection</button>
-      <div class="print-group">
-        <select id="print-size" aria-label="Format d'impression">
-          <option value="A4">A4</option>
-          <option value="A3">A3</option>
-        </select>
-        <button type="button" id="btn-print" class="btn btn-ghost" title="Imprimer ou enregistrer en PDF (vue filtrée)">⎙ Imprimer / PDF</button>
-      </div>
+      <span id="filter-summary" class="filter-summary"></span>
+      <button type="button" id="btn-filters" class="btn btn-ghost" aria-expanded="false" aria-controls="filters">
+        Filtres <span id="filter-count" class="count" hidden></span> <span class="caret" aria-hidden="true">▾</span>
+      </button>
+      <details class="menu" id="more-menu">
+        <summary class="btn btn-ghost" aria-label="Plus d'actions">⋯</summary>
+        <div class="menu-box">
+          <button type="button" id="btn-mass" class="menu-item">✎ Modifier mini / maxi des blocs affichés</button>
+          <div class="menu-item menu-print">
+            <button type="button" id="btn-print" class="linkish">⎙ Imprimer / PDF</button>
+            <select id="print-size" aria-label="Format d'impression">
+              <option value="A4">A4 paysage</option>
+              <option value="A3">A3 paysage</option>
+            </select>
+          </div>
+        </div>
+      </details>
     </div>
   </nav>
 
-  <section id="filters" class="filters no-tv" aria-label="Filtres"></section>
+  <section id="filters" class="filters no-tv" aria-label="Filtres" hidden></section>
 
   <main>
     <section id="view-buffer" class="view" aria-label="Niveaux par bloc">
